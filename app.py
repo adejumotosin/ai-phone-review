@@ -360,14 +360,19 @@ st.set_page_config(
 # Custom CSS for better styling
 st.markdown("""
 <style>
-    .metric-container {
+    .metric-card {
         background-color: #f0f2f6;
         padding: 1rem;
         border-radius: 0.5rem;
-        border-left: 4px solid #1f77b4;
+        margin-bottom: 1rem;
     }
     .stProgress .st-bp {
         background-color: #1f77b4;
+    }
+    /* Ensure text doesn't get cut off */
+    .metric-card p {
+        word-wrap: break-word;
+        overflow-wrap: break-word;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -462,40 +467,32 @@ if generate_button and phone:
     st.markdown("---")
     st.subheader(f"📝 Complete Analysis: {phone}")
     
-    # Metrics row with shorter labels and better formatting
+    # Enhanced metrics display with custom cards to avoid truncation
     col1, col2, col3 = st.columns(3)
-
-with col1:
-    st.markdown(f"""
-    <div style="background: #f0f2f6; padding: 15px; border-radius: 10px; margin-bottom:10px">
-        <h4>⭐ Verdict</h4>
-        <p>{summary_data.get("verdict", "N/A")}</p>
-    </div>
-    """, unsafe_allow_html=True)
-
-with col2:
-    st.markdown(f"""
-    <div style="background: #f0f2f6; padding: 15px; border-radius: 10px; margin-bottom:10px">
-        <h4>🎯 Best For</h4>
-        <p>{summary_data.get("recommendation", "N/A")}</p>
-    </div>
-    """, unsafe_allow_html=True)
-
-with col3:
-    st.markdown(f"""
-    <div style="background: #f0f2f6; padding: 15px; border-radius: 10px; margin-bottom:10px">
-        <h4>📊 Data Found</h4>
-        <p>{len(specs)} specs, {len(reviews)} reviews</p>
-    </div>
-    """, unsafe_allow_html=True)
     
-    # Show full verdict and recommendation in expandable sections if truncated
-    if len(summary_data.get("verdict", "")) > 35 or len(summary_data.get("recommendation", "")) > 35:
-        with st.expander("📋 Full Details"):
-            if len(summary_data.get("verdict", "")) > 35:
-                st.write(f"**Complete Verdict:** {summary_data.get('verdict', 'N/A')}")
-            if len(summary_data.get("recommendation", "")) > 35:
-                st.write(f"**Complete Recommendation:** {summary_data.get('recommendation', 'N/A')}")
+    with col1:
+        st.markdown("""
+        <div style="background-color: #f0f2f6; padding: 1rem; border-radius: 0.5rem; border-left: 4px solid #ff6b35;">
+            <h4 style="margin: 0; color: #ff6b35;">⭐ Verdict</h4>
+            <p style="margin: 0.5rem 0 0 0; font-size: 1.1rem; font-weight: 600;">{}</p>
+        </div>
+        """.format(summary_data.get("verdict", "N/A")), unsafe_allow_html=True)
+    
+    with col2:
+        st.markdown("""
+        <div style="background-color: #f0f2f6; padding: 1rem; border-radius: 0.5rem; border-left: 4px solid #1f77b4;">
+            <h4 style="margin: 0; color: #1f77b4;">🎯 Best For</h4>
+            <p style="margin: 0.5rem 0 0 0; font-size: 1.1rem; font-weight: 600;">{}</p>
+        </div>
+        """.format(summary_data.get("recommendation", "N/A")), unsafe_allow_html=True)
+    
+    with col3:
+        st.markdown("""
+        <div style="background-color: #f0f2f6; padding: 1rem; border-radius: 0.5rem; border-left: 4px solid #28a745;">
+            <h4 style="margin: 0; color: #28a745;">📊 Data Found</h4>
+            <p style="margin: 0.5rem 0 0 0; font-size: 1.1rem; font-weight: 600;">{} specs, {} reviews</p>
+        </div>
+        """.format(len(specs), len(reviews)), unsafe_allow_html=True)
 
     # Bottom line summary
     st.markdown("### 🎯 Bottom Line")
