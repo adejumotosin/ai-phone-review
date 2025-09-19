@@ -464,20 +464,30 @@ if generate_button and phone:
     
     # Metrics row with shorter labels and better formatting
     col1, col2, col3 = st.columns(3)
-    with col1:
-        verdict = summary_data.get("verdict", "N/A")
-        # Truncate long verdicts
-        if len(verdict) > 35:
-            verdict = verdict[:32] + "..."
-        st.metric("⭐ Verdict", verdict)
-    with col2:
-        recommendation = summary_data.get("recommendation", "N/A")
-        # Truncate long recommendations  
-        if len(recommendation) > 35:
-            recommendation = recommendation[:32] + "..."
-        st.metric("🎯 Best For", recommendation)
-    with col3:
-        st.metric("📊 Data Found", f"{len(specs)} specs, {len(reviews)} reviews")
+
+with col1:
+    st.markdown(f"""
+    <div style="background: #f0f2f6; padding: 15px; border-radius: 10px; margin-bottom:10px">
+        <h4>⭐ Verdict</h4>
+        <p>{summary_data.get("verdict", "N/A")}</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+with col2:
+    st.markdown(f"""
+    <div style="background: #f0f2f6; padding: 15px; border-radius: 10px; margin-bottom:10px">
+        <h4>🎯 Best For</h4>
+        <p>{summary_data.get("recommendation", "N/A")}</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+with col3:
+    st.markdown(f"""
+    <div style="background: #f0f2f6; padding: 15px; border-radius: 10px; margin-bottom:10px">
+        <h4>📊 Data Found</h4>
+        <p>{len(specs)} specs, {len(reviews)} reviews</p>
+    </div>
+    """, unsafe_allow_html=True)
     
     # Show full verdict and recommendation in expandable sections if truncated
     if len(summary_data.get("verdict", "")) > 35 or len(summary_data.get("recommendation", "")) > 35:
