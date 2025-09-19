@@ -2,6 +2,7 @@
 import os
 import re
 import json
+import time
 import hashlib
 import requests
 import pandas as pd
@@ -183,6 +184,9 @@ def fetch_gsmarena_reviews(url, limit=20):
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
         }
         
+        # Add a delay to avoid rate limiting
+        time.sleep(2)
+        
         r = requests.get(url, headers=headers, timeout=10)
         r.raise_for_status()
         soup = BeautifulSoup(r.text, "html.parser")
@@ -250,27 +254,26 @@ def fetch_gsmarena_reviews(url, limit=20):
             if review_blocks:
                 break
 
-        # Extract review text
-        for block in review_blocks[:limit * 2]:  # Get more to filter better
+        # Extract review text with loosened filtering
+        for block in review_blocks[:100]:  # Increase the pool of blocks to check
             review_text = block.get_text(strip=True)
             
-            # Filter out noise and keep quality reviews
-            if (len(review_text) > 30 and 
+            # Refined filter to be less restrictive
+            if (len(review_text) > 35 and 
                 len(review_text) < 1000 and
                 not review_text.lower().startswith(("anonymous", "user", "by", "reply", "quote")) and
-                not any(word in review_text.lower() for word in ["gsmarena", "admin", "moderator", "delete", "report"]) and
-                any(word in review_text.lower() for word in ["phone", "camera", "battery", "screen", "good", "bad", "love", "hate", "recommend", "buy", "device"])):
+                not any(word in review_text.lower() for word in ["gsmarena", "admin", "moderator", "delete", "report"])):
                 
                 reviews.append(review_text)
                 
                 if len(reviews) >= limit:
                     break
         
-        # If no reviews found with strict filtering, try with looser criteria
+        # If no reviews found with strict filtering, try with even looser criteria
         if not reviews:
             for block in review_blocks[:limit]:
                 review_text = block.get_text(strip=True)
-                if len(review_text) > 20 and len(review_text) < 500:
+                if len(review_text) > 25 and len(review_text) < 500:
                     reviews.append(review_text)
             
     except Exception as e:
