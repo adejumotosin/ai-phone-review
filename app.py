@@ -32,6 +32,7 @@ def resolve_gsmarena_url(product_name):
         soup = BeautifulSoup(r.text, "html.parser")
 
         # ✅ get first result link
+        # Based on your image, this selector is still correct.
         link = soup.select_one(".makers a")
         if not link:
             return None, None
@@ -54,7 +55,7 @@ def fetch_gsmarena_specs(url):
     key_map = {
         "Display": ["Display"],
         "Processor": ["Chipset"],
-        "RAM": ["Internal"],  # memory line usually includes RAM + storage
+        "RAM": ["Internal"],
         "Storage": ["Internal"],
         "Camera": ["Main Camera", "Triple", "Quad", "Dual"],
         "Battery": ["Battery"],
@@ -65,7 +66,9 @@ def fetch_gsmarena_specs(url):
         r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"})
         soup = BeautifulSoup(r.text, "html.parser")
 
-        spec_table = soup.select(".specs-list tr")
+        # ✅ PATCHED: Use the new container .article-info and find the table rows.
+        spec_table = soup.select(".article-info table tr")
+        
         for row in spec_table:
             th = row.find("td", class_="ttl")
             td = row.find("td", class_="nfo")
@@ -76,7 +79,6 @@ def fetch_gsmarena_specs(url):
 
             for field, keywords in key_map.items():
                 if any(k.lower() in key.lower() for k in keywords):
-                    # Special handling for RAM vs Storage in "Internal"
                     if field in ["RAM", "Storage"] and "GB" in val:
                         parts = val.split(",")
                         ram = [p for p in parts if "RAM" in p or re.search(r"\d+GB", p)]
@@ -103,21 +105,31 @@ def fetch_gsmarena_reviews(url, limit=20):
         r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"})
         soup = BeautifulSoup(r.text, "html.parser")
 
-        # ✅ fixed selector (.opin)
-        review_blocks = soup.select(".user-thread .opin")
+        # ✅ PATCHED: Use the new ID for the main comment container.
+        review_container = soup.find(id="user-comments")
+        if not review_container:
+            return reviews
+        
+        # Now, find the individual reviews within that container. The class might still be 'opin'.
+        review_blocks = review_container.find_all("div", class_="opin")
+        if not review_blocks:
+            # Fallback for a common alternative structure
+            review_blocks = review_container.find_all("p") 
+
         for block in review_blocks[:limit]:
             reviews.append(block.get_text(strip=True))
+            
     except Exception as e:
         st.warning(f"⚠️ GSMArena reviews fetch failed: {e}")
     return reviews
-
+    
 # -----------------------------
 # 5️⃣ Summarizer with Gemini (spec completion)
 # -----------------------------
 @st.cache_data(ttl=43200, show_spinner="🤖 Summarizing with Gemini...")
 def summarize_reviews(product_name, specs, reviews):
     reviews_text = "\n".join(reviews[:50])
-    reviews_hash = hashlib.md5((reviews_text + str(specs)).encode("utf-8")).hexdigest()
+    reviews_hash = hashlib.md5((reviews_text + str(specs)).encode("utf-8")).heigest()
 
     specs_context = "\n".join([f"{k}: {v}" for k, v in specs.items()]) if specs else "No specs found"
     reviews_context = "\n".join([f"- {r}" for r in reviews[:20]]) if reviews else "No reviews found"
