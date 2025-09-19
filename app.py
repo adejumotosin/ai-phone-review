@@ -28,235 +28,402 @@ def resolve_gsmarena_url(product_name):
     try:
         query = product_name.replace(" ", "+")
         search_url = f"https://www.gsmarena.com/results.php3?sQuickSearch=yes&sName={query}"
-        r = requests.get(search_url, headers={"User-Agent": "Mozilla/5.0"})
+        
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        }
+        
+        r = requests.get(search_url, headers=headers, timeout=10)
+        r.raise_for_status()
         soup = BeautifulSoup(r.text, "html.parser")
 
-        # ✅ get first result link
-        # Based on your image, this selector is still correct.
-        link = soup.select_one(".makers a")
+        # Try multiple selectors for robustness
+        selectors = [
+            ".makers a",
+            ".makers li a", 
+            ".section-body .makers a",
+            "a[href*='.php']"
+        ]
+        
+        link = None
+        for selector in selectors:
+            link = soup.select_one(selector)
+            if link:
+                break
+                
         if not link:
             return None, None
 
         product_url = "https://www.gsmarena.com/" + link["href"]
-
-        # ✅ build reviews URL
         review_url = product_url.replace(".php", "-reviews.php")
         return product_url, review_url
+        
     except Exception as e:
         st.warning(f"⚠️ GSMArena search failed: {e}")
         return None, None
 
 # -----------------------------
-# 3️⃣ Focused Specs Scraper
+# 3️⃣ Enhanced Specs Scraper
 # -----------------------------
 @st.cache_data(ttl=86400, show_spinner="📊 Fetching specs...")
 def fetch_gsmarena_specs(url):
     specs = {}
     key_map = {
-        "Display": ["Display"],
-        "Processor": ["Chipset"],
-        "RAM": ["Internal"],
-        "Storage": ["Internal"],
-        "Camera": ["Main Camera", "Triple", "Quad", "Dual"],
+        "Display": ["Display", "Screen", "Size"],
+        "Processor": ["Chipset", "CPU", "Processor", "SoC"],
+        "RAM": ["Internal", "Memory", "RAM"],
+        "Storage": ["Internal", "Storage", "Memory"],
+        "Camera": ["Main Camera", "Triple", "Quad", "Dual", "Camera"],
         "Battery": ["Battery"],
-        "OS": ["OS"]
+        "OS": ["OS", "Android", "iOS"]
     }
 
     try:
-        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"})
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        }
+        
+        r = requests.get(url, headers=headers, timeout=10)
+        r.raise_for_status()
         soup = BeautifulSoup(r.text, "html.parser")
 
-        # ✅ PATCHED: Use the new container .article-info and find the table rows.
-        spec_table = soup.select(".article-info table tr")
+        # Try multiple selectors for spec tables
+        spec_containers = [
+            ".article-info table tr",
+            "#specs-list table tr",
+            "table.specs tr",
+            ".specs-brief-accent tr"
+        ]
         
-        for row in spec_table:
-            th = row.find("td", class_="ttl")
-            td = row.find("td", class_="nfo")
+        spec_rows = []
+        for container_selector in spec_containers:
+            spec_rows = soup.select(container_selector)
+            if spec_rows:
+                break
+        
+        for row in spec_rows:
+            # Try different cell selectors
+            th = row.find("td", class_="ttl") or row.find("th") or row.find("td", class_="spec-title")
+            td = row.find("td", class_="nfo") or row.find_all("td")[-1] if row.find_all("td") else None
+            
             if not th or not td:
                 continue
+                
             key = th.get_text(strip=True)
-            val = td.get_text(" ", strip=True)
+            val = td.get_text(" ", strip=True) if hasattr(td, 'get_text') else str(td)
 
+            # Enhanced spec mapping
             for field, keywords in key_map.items():
                 if any(k.lower() in key.lower() for k in keywords):
-                    if field in ["RAM", "Storage"] and "GB" in val:
-                        parts = val.split(",")
-                        ram = [p for p in parts if "RAM" in p or re.search(r"\d+GB", p)]
-                        storage = [p for p in parts if "ROM" in p or "storage" in p.lower()]
-                        if field == "RAM" and ram:
-                            specs["RAM"] = ram[0].strip()
-                        elif field == "Storage" and storage:
-                            specs["Storage"] = storage[0].strip()
+                    if field in ["RAM", "Storage"]:
+                        # Better RAM/Storage parsing
+                        if "GB" in val:
+                            # Extract numbers followed by GB
+                            gb_matches = re.findall(r'(\d+)\s*GB', val)
+                            if gb_matches:
+                                if field == "RAM":
+                                    specs["RAM"] = f"{gb_matches[0]}GB RAM"
+                                elif field == "Storage" and len(gb_matches) > 1:
+                                    specs["Storage"] = f"{gb_matches[1]}GB Storage"
+                                elif field == "Storage":
+                                    specs["Storage"] = f"{gb_matches[0]}GB Storage"
                         else:
                             specs[field] = val
                     else:
                         specs[field] = val
+                    break
+                    
     except Exception as e:
         st.warning(f"⚠️ GSMArena specs fetch failed: {e}")
+    
     return specs
 
 # -----------------------------
-# 4️⃣ Reviews Scraper
+# 4️⃣ Enhanced Reviews Scraper
 # -----------------------------
 @st.cache_data(ttl=21600, show_spinner="💬 Fetching GSMArena reviews...")
 def fetch_gsmarena_reviews(url, limit=20):
     reviews = []
     try:
-        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"})
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        }
+        
+        r = requests.get(url, headers=headers, timeout=10)
+        r.raise_for_status()
         soup = BeautifulSoup(r.text, "html.parser")
 
-        # ✅ PATCHED: Use the new ID for the main comment container.
-        review_container = soup.find(id="user-comments")
+        # Try multiple selectors for review containers
+        review_containers = [
+            "#user-comments",
+            ".user-reviews",
+            ".reviews-container",
+            "#comments"
+        ]
+        
+        review_container = None
+        for container_id in review_containers:
+            review_container = soup.find(id=container_id.replace("#", "")) or soup.select_one(container_id)
+            if review_container:
+                break
+        
         if not review_container:
             return reviews
         
-        # Now, find the individual reviews within that container. The class might still be 'opin'.
-        review_blocks = review_container.find_all("div", class_="opin")
-        if not review_blocks:
-            # Fallback for a common alternative structure
-            review_blocks = review_container.find_all("p") 
+        # Try multiple selectors for individual reviews
+        review_selectors = [
+            ".opin",
+            ".user-review",
+            ".review-item",
+            "p"
+        ]
+        
+        review_blocks = []
+        for selector in review_selectors:
+            review_blocks = review_container.find_all("div", class_=selector.replace(".", "")) if selector.startswith(".") else review_container.find_all(selector)
+            if review_blocks:
+                break
 
         for block in review_blocks[:limit]:
-            reviews.append(block.get_text(strip=True))
+            review_text = block.get_text(strip=True)
+            # Filter out very short or generic reviews
+            if len(review_text) > 20 and not review_text.lower().startswith(("anonymous", "user", "by")):
+                reviews.append(review_text)
             
     except Exception as e:
         st.warning(f"⚠️ GSMArena reviews fetch failed: {e}")
-    return reviews
     
+    return reviews[:limit]
+
 # -----------------------------
-# 5️⃣ Summarizer with Gemini (spec completion)
+# 5️⃣ Enhanced Summarizer with Better Error Handling
 # -----------------------------
 @st.cache_data(ttl=43200, show_spinner="🤖 Summarizing with Gemini...")
 def summarize_reviews(product_name, specs, reviews):
-    reviews_text = "\n".join(reviews[:50])
-    reviews_hash = hashlib.md5((reviews_text + str(specs)).encode("utf-8")).heigest()
+    try:
+        reviews_text = "\n".join(reviews[:50])
+        reviews_hash = hashlib.md5((reviews_text + str(specs)).encode("utf-8")).hexdigest()
 
-    specs_context = "\n".join([f"{k}: {v}" for k, v in specs.items()]) if specs else "No specs found"
-    reviews_context = "\n".join([f"- {r}" for r in reviews[:20]]) if reviews else "No reviews found"
+        specs_context = "\n".join([f"{k}: {v}" for k, v in specs.items()]) if specs else "No specs found"
+        reviews_context = "\n".join([f"- {r[:200]}..." if len(r) > 200 else f"- {r}" for r in reviews[:20]]) if reviews else "No reviews found"
 
-    prompt = f"""
-    You are an AI Review Summarizer.
-    Combine **GSMArena official specs** with **real user reviews** for {product_name}.
+        prompt = f"""
+        You are an AI Review Summarizer analyzing the {product_name}.
+        Combine **GSMArena official specs** with **real user reviews** to create a comprehensive analysis.
 
-    Specs:
-    {specs_context}
+        OFFICIAL SPECS:
+        {specs_context}
 
-    User Reviews:
-    {reviews_context}
+        USER REVIEWS SAMPLE:
+        {reviews_context}
 
-    ⚠️ IMPORTANT:
-    - Always include all 7 spec fields: Display, Processor, RAM, Storage, Camera, Battery, OS.
-    - If missing, infer conservatively or set to "N/A".
-    - Return ONLY valid JSON (no markdown, no commentary).
+        CRITICAL REQUIREMENTS:
+        1. Always include all 7 spec fields: Display, Processor, RAM, Storage, Camera, Battery, OS
+        2. If a spec is missing, research common specs for this phone model or mark as "Not specified"
+        3. Make verdicts realistic (avoid overly positive/negative bias)
+        4. Extract actual user quotes (2-4 sentences max each)
+        5. Return ONLY valid JSON (no markdown, no extra text)
 
-    Output JSON:
-    {{
-      "verdict": "...",
-      "pros": ["..."],
-      "cons": ["..."],
-      "aspect_sentiments": [
-        {{"Aspect": "Camera", "Positive": 80, "Negative": 20}},
-        {{"Aspect": "Battery", "Positive": 70, "Negative": 30}}
-      ],
-      "user_quotes": ["short real quotes from reviews"],
-      "recommendation": "...",
-      "bottom_line": "...",
-      "phone_specs": {{
-        "Display": "...",
-        "Processor": "...",
-        "RAM": "...",
-        "Storage": "...",
-        "Camera": "...",
-        "Battery": "...",
-        "OS": "..."
-      }}
-    }}
-    """
+        Output this exact JSON structure:
+        {{
+          "verdict": "Brief overall rating (e.g., 'Good mid-range option' or 'Excellent flagship')",
+          "pros": ["Specific advantage 1", "Specific advantage 2", "Specific advantage 3"],
+          "cons": ["Specific drawback 1", "Specific drawback 2", "Specific drawback 3"],
+          "aspect_sentiments": [
+            {{"Aspect": "Camera", "Positive": 75, "Negative": 25}},
+            {{"Aspect": "Battery", "Positive": 80, "Negative": 20}},
+            {{"Aspect": "Performance", "Positive": 70, "Negative": 30}},
+            {{"Aspect": "Display", "Positive": 85, "Negative": 15}},
+            {{"Aspect": "Build Quality", "Positive": 65, "Negative": 35}}
+          ],
+          "user_quotes": ["Real quote from reviews", "Another user opinion", "Third user comment"],
+          "recommendation": "Who should buy this phone (e.g., 'Best for budget users' or 'Great for photography enthusiasts')",
+          "bottom_line": "2-3 sentence final summary combining specs and user feedback",
+          "phone_specs": {{
+            "Display": "Screen size and type",
+            "Processor": "Chipset name and performance tier",
+            "RAM": "Memory amount",
+            "Storage": "Storage capacity and type",
+            "Camera": "Main camera specs and features",
+            "Battery": "Battery capacity and charging",
+            "OS": "Operating system version"
+          }}
+        }}
+        """
 
-    response = client.models.generate_content(
-        model="gemini-1.5-flash",
-        contents=prompt,
-        config={"response_mime_type": "application/json"}
-    )
+        response = client.models.generate_content(
+            model="gemini-1.5-flash",
+            contents=prompt,
+            config={"response_mime_type": "application/json"}
+        )
 
-    return response.text, reviews_hash
+        return response.text, reviews_hash
+    
+    except Exception as e:
+        st.error(f"⚠️ Gemini API error: {e}")
+        return None, None
 
 # -----------------------------
-# 6️⃣ Streamlit UI
+# 6️⃣ Enhanced Streamlit UI
 # -----------------------------
-st.set_page_config(page_title="AI Review Engine", page_icon="📱", layout="wide")
-st.title("📱 AI-Powered Phone Review Engine (GSMArena Specs + Reviews)")
+st.set_page_config(
+    page_title="AI Review Engine", 
+    page_icon="📱", 
+    layout="wide",
+    initial_sidebar_state="collapsed"
+)
 
+# Custom CSS for better styling
+st.markdown("""
+<style>
+    .metric-container {
+        background-color: #f0f2f6;
+        padding: 1rem;
+        border-radius: 0.5rem;
+        border-left: 4px solid #1f77b4;
+    }
+    .stProgress .st-bp {
+        background-color: #1f77b4;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+st.title("📱 AI-Powered Phone Review Engine")
+st.markdown("**Get comprehensive analysis combining GSMArena specs with real user reviews**")
+
+# Input section
 col1, col2 = st.columns([0.7, 0.3])
 with col1:
-    phone = st.text_input("Enter a phone name", "Samsung Galaxy A17")
+    phone = st.text_input(
+        "Enter phone name", 
+        value="Samsung Galaxy S24", 
+        placeholder="e.g., iPhone 15 Pro, Samsung Galaxy S24, OnePlus 12"
+    )
 with col2:
-    generate_button = st.button("Get Review", type="primary", use_container_width=True)
+    generate_button = st.button("🔍 Analyze Phone", type="primary", use_container_width=True)
 
+# Main processing
 if generate_button and phone:
-    st.info(f"🔎 Collecting GSMArena specs and reviews for {phone}...")
-
-    # Resolve URLs
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    # Step 1: URL Resolution
+    status_text.text("🔎 Searching GSMArena database...")
+    progress_bar.progress(20)
+    
     product_url, review_url = resolve_gsmarena_url(phone)
-
-    # Fetch specs + reviews
-    specs = fetch_gsmarena_specs(product_url) if product_url else {}
-    reviews = fetch_gsmarena_reviews(review_url, limit=20) if review_url else []
-
+    
+    if not product_url:
+        st.error(f"❌ Could not find '{phone}' on GSMArena. Try a different phone name.")
+        st.info("💡 **Tip**: Try using the exact model name (e.g., 'Galaxy S24' instead of 'Samsung S24')")
+        st.stop()
+    
+    # Step 2: Fetch specs
+    status_text.text("📊 Extracting technical specifications...")
+    progress_bar.progress(40)
+    
+    specs = fetch_gsmarena_specs(product_url)
+    
+    # Step 3: Fetch reviews
+    status_text.text("💬 Collecting user reviews...")
+    progress_bar.progress(60)
+    
+    reviews = fetch_gsmarena_reviews(review_url, limit=25)
+    
+    # Step 4: AI Analysis
+    status_text.text("🤖 Generating AI analysis...")
+    progress_bar.progress(80)
+    
     if not reviews and not specs:
-        st.error("❌ No GSMArena data found. Try another phone.")
+        st.error("❌ No data found. The phone might be too new or not available on GSMArena.")
+        st.stop()
+    
+    # Summarize with Gemini
+    summary_result = summarize_reviews(phone, specs, reviews)
+    
+    progress_bar.progress(100)
+    status_text.text("✅ Analysis complete!")
+    
+    if not summary_result[0]:
+        st.error("⚠️ Failed to generate AI summary. Please try again.")
+        st.stop()
+    
+    try:
+        summary_data = json.loads(summary_result[0])
+    except json.JSONDecodeError as e:
+        st.error(f"⚠️ Error parsing AI response: {e}")
+        with st.expander("Raw AI Output"):
+            st.text_area("Debug Output", summary_result[0], height=200)
         st.stop()
 
-    st.success(f"✅ Fetched {len(specs)} specs and {len(reviews)} reviews")
-
-    # Summarize
-    with st.spinner("🤖 Summarizing with Gemini..."):
-        try:
-            summary_text, _ = summarize_reviews(phone, specs, reviews)
-            summary_data = json.loads(summary_text)
-        except Exception as e:
-            st.error(f"⚠️ Error parsing summary: {e}")
-            st.text_area("Raw Output", summary_text, height=300)
-            st.stop()
-
+    # Clear progress indicators
+    progress_bar.empty()
+    status_text.empty()
+    
     # Display results
     st.markdown("---")
-    st.subheader(f"📝 Review Summary for {phone}")
-
-    col1, col2 = st.columns(2)
+    st.subheader(f"📝 Complete Analysis: {phone}")
+    
+    # Metrics row
+    col1, col2, col3 = st.columns(3)
     with col1:
-        st.metric("⭐ Verdict", summary_data.get("verdict", "N/A"))
+        st.metric("⭐ Overall Verdict", summary_data.get("verdict", "N/A"))
     with col2:
-        st.metric("🎯 Recommendation", summary_data.get("recommendation", "N/A"))
+        st.metric("🎯 Best For", summary_data.get("recommendation", "N/A"))
+    with col3:
+        st.metric("📊 Data Sources", f"{len(specs)} specs, {len(reviews)} reviews")
 
-    st.markdown("### 📋 Bottom Line")
-    st.info(summary_data.get("bottom_line", "No summary provided."))
+    # Bottom line summary
+    st.markdown("### 🎯 Bottom Line")
+    st.info(summary_data.get("bottom_line", "No summary available."))
 
-    # Specs Table
-    if "phone_specs" in summary_data:
-        st.markdown("### 🔧 Key Phone Specifications")
-        specs_df = pd.DataFrame(summary_data["phone_specs"].items(), columns=["Spec", "Details"])
-        st.table(specs_df)
-
-    # Pros & Cons
-    col1, col2 = st.columns(2)
+    # Two-column layout for main content
+    col1, col2 = st.columns([0.6, 0.4])
+    
     with col1:
-        st.markdown("### ✅ Pros")
+        # Specifications table
+        if "phone_specs" in summary_data and summary_data["phone_specs"]:
+            st.markdown("### 🔧 Technical Specifications")
+            specs_df = pd.DataFrame(
+                summary_data["phone_specs"].items(), 
+                columns=["Component", "Details"]
+            )
+            st.table(specs_df)
+        
+        # Aspect sentiments chart
+        if "aspect_sentiments" in summary_data and summary_data["aspect_sentiments"]:
+            st.markdown("### 📊 User Sentiment Analysis")
+            df = pd.DataFrame(summary_data["aspect_sentiments"])
+            if not df.empty and "Aspect" in df.columns:
+                chart_data = df.set_index("Aspect")[["Positive", "Negative"]]
+                st.bar_chart(chart_data, height=300)
+    
+    with col2:
+        # Pros and Cons
+        st.markdown("### ✅ Strengths")
         for pro in summary_data.get("pros", []):
-            st.write(f"- {pro}")
-    with col2:
-        st.markdown("### ⚠️ Cons")
+            st.success(f"✓ {pro}")
+            
+        st.markdown("### ⚠️ Weaknesses")  
         for con in summary_data.get("cons", []):
-            st.write(f"- {con}")
+            st.error(f"✗ {con}")
 
-    # Aspect Sentiments
-    if "aspect_sentiments" in summary_data:
-        st.markdown("### 📊 Aspect Sentiments")
-        df = pd.DataFrame(summary_data["aspect_sentiments"])
-        if "Aspect" in df.columns:
-            st.bar_chart(df.set_index("Aspect")[["Positive", "Negative"]])
+    # User quotes section
+    if summary_data.get("user_quotes"):
+        st.markdown("### 💬 What Users Are Saying")
+        for i, quote in enumerate(summary_data.get("user_quotes", []), 1):
+            st.info(f"**User {i}:** {quote}")
 
-    # User Quotes
-    st.markdown("### 👥 Real User Quotes")
-    for i, quote in enumerate(summary_data.get("user_quotes", []), 1):
-        st.info(f"💬 {quote}")
+    # Footer info
+    st.markdown("---")
+    st.markdown("**Data Sources:** GSMArena specifications and user reviews | **AI Analysis:** Google Gemini")
+    
+    # Option to view raw data
+    with st.expander("🔍 View Raw Data"):
+        col1, col2 = st.columns(2)
+        with col1:
+            st.json(specs)
+        with col2:
+            st.write("**Sample Reviews:**")
+            for i, review in enumerate(reviews[:5], 1):
+                st.write(f"{i}. {review[:200]}...")
