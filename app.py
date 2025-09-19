@@ -20,7 +20,7 @@ if not api_key:
 client = genai.Client(api_key=api_key)
 
 # -----------------------------
-# 2️⃣ GSMArena URL Resolver
+# 2️⃣ Enhanced GSMArena URL Resolver
 # -----------------------------
 @st.cache_data(ttl=86400, show_spinner="🔗 Finding GSMArena page...")
 def resolve_gsmarena_url(product_name):
@@ -55,8 +55,39 @@ def resolve_gsmarena_url(product_name):
             return None, None
 
         product_url = "https://www.gsmarena.com/" + link["href"]
-        review_url = product_url.replace(".php", "-reviews.php")
-        return product_url, review_url
+        
+        # Extract the phone ID from the URL for building review URL
+        # URL format: samsung_galaxy_s24-12773.php
+        href = link["href"]
+        if "-" in href and ".php" in href:
+            # Extract the ID (e.g., "12773" from "samsung_galaxy_s24-12773.php")
+            phone_id = href.split("-")[-1].replace(".php", "")
+            phone_name = href.replace(f"-{phone_id}.php", "").replace("_", " ")
+            
+            # Try multiple review URL patterns
+            review_urls = [
+                f"https://www.gsmarena.com/{href.replace('.php', '-reviews.php')}",
+                f"https://m.gsmarena.com/{href.replace('_', ' ').replace('.php', '')}-reviews-{phone_id}.php",
+                f"https://www.gsmarena.com/reviews.php3?idPhone={phone_id}",
+                f"https://m.gsmarena.com/{phone_name.replace(' ', '_')}-reviews-{phone_id}.php"
+            ]
+            
+            # Test which review URL actually exists
+            valid_review_url = None
+            for review_url in review_urls:
+                try:
+                    test_response = requests.head(review_url, headers=headers, timeout=5)
+                    if test_response.status_code == 200:
+                        valid_review_url = review_url
+                        break
+                except:
+                    continue
+            
+            return product_url, valid_review_url
+        else:
+            # Fallback to original method
+            review_url = product_url.replace(".php", "-reviews.php")
+            return product_url, review_url
         
     except Exception as e:
         st.warning(f"⚠️ GSMArena search failed: {e}")
@@ -139,11 +170,14 @@ def fetch_gsmarena_specs(url):
     return specs
 
 # -----------------------------
-# 4️⃣ Enhanced Reviews Scraper
+# 4️⃣ Enhanced Reviews Scraper (Mobile & Desktop)
 # -----------------------------
 @st.cache_data(ttl=21600, show_spinner="💬 Fetching GSMArena reviews...")
 def fetch_gsmarena_reviews(url, limit=20):
     reviews = []
+    if not url:
+        return reviews
+        
     try:
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
@@ -153,42 +187,91 @@ def fetch_gsmarena_reviews(url, limit=20):
         r.raise_for_status()
         soup = BeautifulSoup(r.text, "html.parser")
 
-        # Try multiple selectors for review containers
-        review_containers = [
-            "#user-comments",
-            ".user-reviews",
-            ".reviews-container",
-            "#comments"
-        ]
+        # Detect if this is mobile or desktop GSMArena
+        is_mobile = "m.gsmarena.com" in url
         
+        if is_mobile:
+            # Mobile GSMArena selectors
+            review_containers = [
+                ".user-thread",
+                ".thread",
+                ".review-item",
+                "#user-reviews"
+            ]
+            
+            review_selectors = [
+                ".uopin",
+                ".user-opinion", 
+                ".thread-content",
+                "p"
+            ]
+        else:
+            # Desktop GSMArena selectors
+            review_containers = [
+                "#user-comments",
+                ".user-reviews",
+                ".reviews-container",
+                "#comments"
+            ]
+            
+            review_selectors = [
+                ".opin",
+                ".user-review",
+                ".review-item",
+                "p"
+            ]
+        
+        # Find review container
         review_container = None
-        for container_id in review_containers:
-            review_container = soup.find(id=container_id.replace("#", "")) or soup.select_one(container_id)
+        for container_selector in review_containers:
+            if container_selector.startswith("#"):
+                review_container = soup.find(id=container_selector[1:])
+            else:
+                review_container = soup.select_one(container_selector)
             if review_container:
                 break
         
         if not review_container:
-            return reviews
+            # Try to find any container with reviews
+            review_container = soup.find("div", string=lambda text: text and ("review" in text.lower() or "opinion" in text.lower()))
+            if not review_container:
+                review_container = soup  # Use entire page as fallback
         
-        # Try multiple selectors for individual reviews
-        review_selectors = [
-            ".opin",
-            ".user-review",
-            ".review-item",
-            "p"
-        ]
-        
+        # Find individual reviews
         review_blocks = []
         for selector in review_selectors:
-            review_blocks = review_container.find_all("div", class_=selector.replace(".", "")) if selector.startswith(".") else review_container.find_all(selector)
+            if selector.startswith("."):
+                review_blocks = review_container.find_all("div", class_=selector[1:])
+                if not review_blocks:
+                    review_blocks = review_container.find_all("li", class_=selector[1:])
+            else:
+                review_blocks = review_container.find_all(selector)
+            
             if review_blocks:
                 break
 
-        for block in review_blocks[:limit]:
+        # Extract review text
+        for block in review_blocks[:limit * 2]:  # Get more to filter better
             review_text = block.get_text(strip=True)
-            # Filter out very short or generic reviews
-            if len(review_text) > 20 and not review_text.lower().startswith(("anonymous", "user", "by")):
+            
+            # Filter out noise and keep quality reviews
+            if (len(review_text) > 30 and 
+                len(review_text) < 1000 and
+                not review_text.lower().startswith(("anonymous", "user", "by", "reply", "quote")) and
+                not any(word in review_text.lower() for word in ["gsmarena", "admin", "moderator", "delete", "report"]) and
+                any(word in review_text.lower() for word in ["phone", "camera", "battery", "screen", "good", "bad", "love", "hate", "recommend", "buy", "device"])):
+                
                 reviews.append(review_text)
+                
+                if len(reviews) >= limit:
+                    break
+        
+        # If no reviews found with strict filtering, try with looser criteria
+        if not reviews:
+            for block in review_blocks[:limit]:
+                review_text = block.get_text(strip=True)
+                if len(review_text) > 20 and len(review_text) < 500:
+                    reviews.append(review_text)
             
     except Exception as e:
         st.warning(f"⚠️ GSMArena reviews fetch failed: {e}")
@@ -318,6 +401,12 @@ if generate_button and phone:
         st.info("💡 **Tip**: Try using the exact model name (e.g., 'Galaxy S24' instead of 'Samsung S24')")
         st.stop()
     
+    st.success(f"✅ Found product page: {product_url}")
+    if review_url:
+        st.success(f"✅ Found reviews page: {review_url}")
+    else:
+        st.warning("⚠️ No review page found - will proceed with specs only")
+    
     # Step 2: Fetch specs
     status_text.text("📊 Extracting technical specifications...")
     progress_bar.progress(40)
@@ -328,7 +417,15 @@ if generate_button and phone:
     status_text.text("💬 Collecting user reviews...")
     progress_bar.progress(60)
     
-    reviews = fetch_gsmarena_reviews(review_url, limit=25)
+    reviews = []
+    if review_url:
+        reviews = fetch_gsmarena_reviews(review_url, limit=25)
+        if reviews:
+            st.success(f"✅ Found {len(reviews)} user reviews")
+        else:
+            st.warning("⚠️ No user reviews found - analysis will be based on specs only")
+    else:
+        st.info("ℹ️ No review URL available - proceeding with specs analysis")
     
     # Step 4: AI Analysis
     status_text.text("🤖 Generating AI analysis...")
