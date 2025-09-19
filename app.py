@@ -363,11 +363,13 @@ st.set_page_config(
 # Custom CSS for better styling
 st.markdown("""
 <style>
+    /* Change the background color of the metric cards to black */
     .metric-card {
-        background-color: #f0f2f6;
+        background-color: black; /* Changed from #f0f2f6 to black */
         padding: 1rem;
         border-radius: 0.5rem;
         margin-bottom: 1rem;
+        color: white; /* Ensure text inside the black box is white */
     }
     .metric-title-box {
         background-color: #ff6b35; /* Default color for Verdict */
@@ -377,7 +379,7 @@ st.markdown("""
         display: inline-block;
         margin-bottom: 0.5rem;
     }
-    /* Specific colors for each card */
+    /* Specific colors for each title bar */
     .metric-verdict .metric-title-box {
         background-color: #ff6b35;
     }
@@ -394,6 +396,11 @@ st.markdown("""
         word-wrap: break-word;
         overflow-wrap: break-word;
         margin: 0;
+        color: white; /* Ensure content text is white against the black background */
+    }
+    /* Ensure other text in the main body is visible if global dark mode isn't enough */
+    .stApp {
+        color: white; /* This will affect all text if you're using Streamlit's light theme with a dark background */
     }
 </style>
 """, unsafe_allow_html=True)
