@@ -303,13 +303,14 @@ def summarize_reviews(product_name, specs, reviews):
         CRITICAL REQUIREMENTS:
         1. Always include all 7 spec fields: Display, Processor, RAM, Storage, Camera, Battery, OS
         2. If a spec is missing, research common specs for this phone model or mark as "Not specified"
-        3. Make verdicts realistic (avoid overly positive/negative bias)
-        4. Extract actual user quotes (2-4 sentences max each)
-        5. Return ONLY valid JSON (no markdown, no extra text)
+        3. Keep verdict under 30 characters (e.g., "Great flagship" not "Excellent high-end smartphone with premium features")
+        4. Keep recommendation under 35 characters (e.g., "Power users & photographers" not "Best for users who prioritize performance and camera quality")
+        5. Extract actual user quotes (2-4 sentences max each)
+        6. Return ONLY valid JSON (no markdown, no extra text)
 
         Output this exact JSON structure:
         {{
-          "verdict": "Brief overall rating (e.g., 'Good mid-range option' or 'Excellent flagship')",
+          "verdict": "Brief rating (max 30 chars, e.g., 'Great flagship phone')",
           "pros": ["Specific advantage 1", "Specific advantage 2", "Specific advantage 3"],
           "cons": ["Specific drawback 1", "Specific drawback 2", "Specific drawback 3"],
           "aspect_sentiments": [
@@ -320,7 +321,7 @@ def summarize_reviews(product_name, specs, reviews):
             {{"Aspect": "Build Quality", "Positive": 65, "Negative": 35}}
           ],
           "user_quotes": ["Real quote from reviews", "Another user opinion", "Third user comment"],
-          "recommendation": "Who should buy this phone (e.g., 'Best for budget users' or 'Great for photography enthusiasts')",
+          "recommendation": "Target audience (max 35 chars, e.g., 'Power users & photographers')",
           "bottom_line": "2-3 sentence final summary combining specs and user feedback",
           "phone_specs": {{
             "Display": "Screen size and type",
@@ -461,14 +462,30 @@ if generate_button and phone:
     st.markdown("---")
     st.subheader(f"📝 Complete Analysis: {phone}")
     
-    # Metrics row
+    # Metrics row with shorter labels and better formatting
     col1, col2, col3 = st.columns(3)
     with col1:
-        st.metric("⭐ Overall Verdict", summary_data.get("verdict", "N/A"))
+        verdict = summary_data.get("verdict", "N/A")
+        # Truncate long verdicts
+        if len(verdict) > 35:
+            verdict = verdict[:32] + "..."
+        st.metric("⭐ Verdict", verdict)
     with col2:
-        st.metric("🎯 Best For", summary_data.get("recommendation", "N/A"))
+        recommendation = summary_data.get("recommendation", "N/A")
+        # Truncate long recommendations  
+        if len(recommendation) > 35:
+            recommendation = recommendation[:32] + "..."
+        st.metric("🎯 Best For", recommendation)
     with col3:
-        st.metric("📊 Data Sources", f"{len(specs)} specs, {len(reviews)} reviews")
+        st.metric("📊 Data Found", f"{len(specs)} specs, {len(reviews)} reviews")
+    
+    # Show full verdict and recommendation in expandable sections if truncated
+    if len(summary_data.get("verdict", "")) > 35 or len(summary_data.get("recommendation", "")) > 35:
+        with st.expander("📋 Full Details"):
+            if len(summary_data.get("verdict", "")) > 35:
+                st.write(f"**Complete Verdict:** {summary_data.get('verdict', 'N/A')}")
+            if len(summary_data.get("recommendation", "")) > 35:
+                st.write(f"**Complete Recommendation:** {summary_data.get('recommendation', 'N/A')}")
 
     # Bottom line summary
     st.markdown("### 🎯 Bottom Line")
