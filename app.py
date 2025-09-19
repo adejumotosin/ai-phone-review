@@ -369,13 +369,31 @@ st.markdown("""
         border-radius: 0.5rem;
         margin-bottom: 1rem;
     }
+    .metric-title-box {
+        background-color: #ff6b35; /* Default color for Verdict */
+        color: white;
+        padding: 0.25rem 0.5rem;
+        border-radius: 0.25rem;
+        display: inline-block;
+        margin-bottom: 0.5rem;
+    }
+    /* Specific colors for each card */
+    .metric-verdict .metric-title-box {
+        background-color: #ff6b35;
+    }
+    .metric-best-for .metric-title-box {
+        background-color: #1f77b4;
+    }
+    .metric-data-found .metric-title-box {
+        background-color: #28a745;
+    }
     .stProgress .st-bp {
         background-color: #1f77b4;
     }
-    /* Ensure text doesn't get cut off */
     .metric-card p {
         word-wrap: break-word;
         overflow-wrap: break-word;
+        margin: 0;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -474,28 +492,28 @@ if generate_button and phone:
     col1, col2, col3 = st.columns(3)
     
     with col1:
-        st.markdown("""
-        <div style="background-color: #f0f2f6; padding: 1rem; border-radius: 0.5rem; border-left: 4px solid #ff6b35;">
-            <h4 style="margin: 0; color: #ff6b35;">⭐ Verdict</h4>
-            <p style="margin: 0.5rem 0 0 0; font-size: 1.1rem; font-weight: 600;">{}</p>
+        st.markdown(f"""
+        <div class="metric-card metric-verdict">
+            <span class="metric-title-box">⭐ Verdict</span>
+            <p style="font-size: 1.1rem; font-weight: 600;">{summary_data.get("verdict", "N/A")}</p>
         </div>
-        """.format(summary_data.get("verdict", "N/A")), unsafe_allow_html=True)
+        """, unsafe_allow_html=True)
     
     with col2:
-        st.markdown("""
-        <div style="background-color: #f0f2f6; padding: 1rem; border-radius: 0.5rem; border-left: 4px solid #1f77b4;">
-            <h4 style="margin: 0; color: #1f77b4;">🎯 Best For</h4>
-            <p style="margin: 0.5rem 0 0 0; font-size: 1.1rem; font-weight: 600;">{}</p>
+        st.markdown(f"""
+        <div class="metric-card metric-best-for">
+            <span class="metric-title-box">🎯 Best For</span>
+            <p style="font-size: 1.1rem; font-weight: 600;">{summary_data.get("recommendation", "N/A")}</p>
         </div>
-        """.format(summary_data.get("recommendation", "N/A")), unsafe_allow_html=True)
+        """, unsafe_allow_html=True)
     
     with col3:
-        st.markdown("""
-        <div style="background-color: #f0f2f6; padding: 1rem; border-radius: 0.5rem; border-left: 4px solid #28a745;">
-            <h4 style="margin: 0; color: #28a745;">📊 Data Found</h4>
-            <p style="margin: 0.5rem 0 0 0; font-size: 1.1rem; font-weight: 600;">{} specs, {} reviews</p>
+        st.markdown(f"""
+        <div class="metric-card metric-data-found">
+            <span class="metric-title-box">📊 Data Found</span>
+            <p style="font-size: 1.1rem; font-weight: 600;">{len(specs)} specs, {len(reviews)} reviews</p>
         </div>
-        """.format(len(specs), len(reviews)), unsafe_allow_html=True)
+        """, unsafe_allow_html=True)
 
     # Bottom line summary
     st.markdown("### 🎯 Bottom Line")
