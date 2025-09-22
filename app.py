@@ -262,4 +262,3 @@ if summary_data.get("user_quotes"):
 st.markdown("---")
 st.markdown("**Data Sources:** GSMArena specifications and user reviews | **AI Analysis:** Google Gemini")
 st.download_button("📥 Download JSON", json.dumps(summary_data, indent=2), "summary.json")
-
