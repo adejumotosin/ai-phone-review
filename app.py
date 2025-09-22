@@ -10,6 +10,7 @@ import pandas as pd
 import streamlit as st
 from bs4 import BeautifulSoup
 import google.generativeai as genai
+from urllib.parse import urljoin, urlparse, parse_qs, urlencode
 
 # -----------------------------
 # Configure Gemini (Google) SDK
@@ -48,8 +49,8 @@ def resolve_gsmarena_url(product_name: str):
     try:
         query = product_name.strip()
         search_url = f"https://www.gsmarena.com/results.php3?sQuickSearch=yes&sName={requests.utils.quote(query)}"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        r = requests.get(search_url, headers=headers, timeout=10)
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        r = requests.get(search_url, headers=headers, timeout=15)
         r.raise_for_status()
         soup = BeautifulSoup(r.text, "html.parser")
 
@@ -100,8 +101,8 @@ def fetch_gsmarena_specs(url: str):
     if not url:
         return {k: "Not specified" for k in key_map.keys()}
     try:
-        headers = {"User-Agent": "Mozilla/5.0"}
-        r = requests.get(url, headers=headers, timeout=10)
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        r = requests.get(url, headers=headers, timeout=15)
         r.raise_for_status()
         soup = BeautifulSoup(r.text, "html.parser")
 
@@ -141,7 +142,7 @@ def fetch_gsmarena_specs(url: str):
     return specs
 
 # -----------------------------
-# Reviews scraper (pagination aware)
+# FIXED: Reviews scraper with better pagination detection
 # -----------------------------
 @st.cache_data(ttl=21600, show_spinner="💬 Fetching user reviews...")
 def fetch_gsmarena_reviews(url: str, limit: int = 1000):
@@ -153,52 +154,180 @@ def fetch_gsmarena_reviews(url: str, limit: int = 1000):
     if not url:
         return reviews
 
-    headers = {"User-Agent": "Mozilla/5.0"}
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+        "Accept-Encoding": "gzip, deflate",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+    }
+    
     page_url = url
+    visited_urls = set()
+    page_count = 0
+    max_pages = 50  # Safety limit
 
     try:
-        while page_url and len(reviews) < limit:
-            time.sleep(1)  # polite pause
-            r = requests.get(page_url, headers=headers, timeout=10)
+        while page_url and len(reviews) < limit and page_count < max_pages:
+            if page_url in visited_urls:
+                st.warning(f"🔄 Breaking pagination loop - already visited: {page_url}")
+                break
+            
+            visited_urls.add(page_url)
+            page_count += 1
+            
+            st.info(f"📖 Scraping page {page_count}: {len(reviews)} reviews so far...")
+            
+            time.sleep(2)  # More polite delay
+            r = requests.get(page_url, headers=headers, timeout=15)
             r.raise_for_status()
             soup = BeautifulSoup(r.text, "html.parser")
 
-            # Try common selectors
-            blocks = []
-            blocks.extend(soup.select(".opin"))
-            blocks.extend(soup.select(".user-opinion"))
-            blocks.extend(soup.select(".uopin"))
-            blocks.extend(soup.select(".user-review"))
-            blocks.extend(soup.select(".review-item"))
-            # fallback paragraphs from comments area
-            if not blocks:
-                blocks = soup.select("#user-comments p, .thread p, .user-thread p, .post p, p")
+            # More comprehensive selectors for review content
+            review_blocks = []
+            
+            # Try different review selectors in order of preference
+            selectors_to_try = [
+                ".opin",  # Most common
+                ".user-opinion", 
+                ".uopin",
+                ".user-review",
+                ".review-item",
+                ".review-content",
+                ".opinion",
+                "div[id*='opin']",  # IDs containing 'opin'
+                "div.thread-item",
+                ".thread .post",
+                ".user-thread .post"
+            ]
+            
+            for selector in selectors_to_try:
+                blocks = soup.select(selector)
+                if blocks:
+                    review_blocks.extend(blocks)
+                    break  # Use first successful selector
+            
+            # If no review blocks found, try fallback approach
+            if not review_blocks:
+                # Look for divs with specific patterns
+                all_divs = soup.find_all('div')
+                for div in all_divs:
+                    # Check if div contains review-like content
+                    text = div.get_text(strip=True)
+                    if (50 < len(text) < 2000 and 
+                        any(word in text.lower() for word in ['phone', 'battery', 'camera', 'display', 'good', 'bad', 'excellent', 'terrible']) and
+                        not any(skip in text.lower() for skip in ['gsmarena', 'admin', 'moderator', 'advertisement'])):
+                        review_blocks.append(div)
 
-            for blk in blocks:
-                text = blk.get_text(" ", strip=True)
-                if 30 < len(text) < 1200:
-                    low = text.lower()
-                    if not any(skip in low for skip in ["gsmarena", "admin", "moderator", "delete", "report"]):
+            # Extract text from found blocks
+            new_reviews_count = 0
+            for block in review_blocks:
+                text = block.get_text(" ", strip=True)
+                
+                # Better filtering criteria
+                if (30 < len(text) < 1500 and  # Reasonable length
+                    not any(skip in text.lower() for skip in [
+                        'gsmarena', 'admin', 'moderator', 'delete', 'report', 
+                        'advertisement', 'sponsored', 'click here', 'visit our',
+                        'terms of service', 'privacy policy'
+                    ]) and
+                    # Must contain phone-related keywords
+                    any(keyword in text.lower() for keyword in [
+                        'phone', 'battery', 'camera', 'display', 'screen', 
+                        'performance', 'android', 'ios', 'good', 'bad', 'love', 'hate',
+                        'recommend', 'buy', 'excellent', 'terrible', 'amazing', 'awful'
+                    ])):
+                    
+                    # Avoid duplicates
+                    if text not in [r[:100] for r in reviews]:  # Check first 100 chars for similarity
                         reviews.append(text)
+                        new_reviews_count += 1
                         if len(reviews) >= limit:
                             break
 
-            # detect next link (a.pages-next, rel=next, or 'next' text)
-            next_link = soup.select_one("a.pages-next") or soup.find("a", attrs={"rel": "next"}) or soup.find("a", string=re.compile(r"next", re.I))
-            if next_link and next_link.has_attr("href"):
-                href = next_link["href"]
-                page_url = href if href.startswith("http") else "https://www.gsmarena.com/" + href.lstrip("/")
-            else:
-                # try incrementing ?page= if present
-                m = re.search(r"([?&]page=)(\d+)", page_url)
-                if m:
-                    current = int(m.group(2))
-                    page_url = re.sub(r"([?&]page=)\d+", r"\g<1>%d" % (current + 1), page_url)
-                else:
-                    page_url = None
-    except Exception as e:
-        st.warning(f"⚠️ GSMArena reviews fetch failed: {e}")
+            st.info(f"✅ Found {new_reviews_count} new reviews on page {page_count} (total: {len(reviews)})")
+            
+            if new_reviews_count == 0:
+                st.warning(f"⚠️ No new reviews found on page {page_count}, stopping pagination")
+                break
 
+            # IMPROVED pagination detection
+            next_link = None
+            
+            # Method 1: Look for specific next page links
+            next_candidates = [
+                soup.find("a", string=re.compile(r"next", re.I)),
+                soup.find("a", {"title": re.compile(r"next", re.I)}),
+                soup.select_one("a.pages-next"),
+                soup.find("a", attrs={"rel": "next"}),
+                soup.select_one(".pagination a[href*='page=']:last-child"),
+            ]
+            
+            for candidate in next_candidates:
+                if candidate and candidate.has_attr("href"):
+                    next_link = candidate
+                    break
+            
+            # Method 2: Look for numbered pagination
+            if not next_link:
+                current_page = page_count
+                page_links = soup.find_all("a", href=re.compile(r"page=\d+"))
+                for link in page_links:
+                    href = link["href"]
+                    match = re.search(r"page=(\d+)", href)
+                    if match and int(match.group(1)) == current_page + 1:
+                        next_link = link
+                        break
+            
+            # Method 3: Try to construct next page URL manually
+            if not next_link and "page=" in page_url:
+                try:
+                    # Parse current page number and increment
+                    parsed = urlparse(page_url)
+                    query_params = parse_qs(parsed.query)
+                    
+                    current_page_num = 1
+                    if 'page' in query_params:
+                        current_page_num = int(query_params['page'][0])
+                    
+                    # Construct next page URL
+                    query_params['page'] = [str(current_page_num + 1)]
+                    new_query = urlencode(query_params, doseq=True)
+                    next_page_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}?{new_query}"
+                    
+                    # Verify this page exists by checking if it's different from current
+                    if next_page_url != page_url:
+                        page_url = next_page_url
+                        continue
+                except Exception as e:
+                    st.warning(f"Failed to construct next page URL: {e}")
+            
+            # Method 4: Add page parameter if none exists
+            elif not next_link and "page=" not in page_url:
+                separator = "&" if "?" in page_url else "?"
+                next_page_url = f"{page_url}{separator}page=2"
+                page_url = next_page_url
+                continue
+            
+            # If we found a next link, process it
+            if next_link:
+                href = next_link["href"]
+                if href.startswith("http"):
+                    page_url = href
+                else:
+                    page_url = urljoin("https://www.gsmarena.com/", href)
+                st.info(f"🔗 Found next page: {page_url}")
+            else:
+                st.info("🏁 No more pagination links found")
+                break
+
+    except Exception as e:
+        st.error(f"⚠️ GSMArena reviews fetch failed: {e}")
+        import traceback
+        st.error(traceback.format_exc())
+
+    st.success(f"🎉 Successfully collected {len(reviews)} reviews from {page_count} pages")
     return reviews[:limit]
 
 # -----------------------------
@@ -321,7 +450,7 @@ def summarize_reviews_chunked(product_name: str, specs: dict, reviews: list, chu
         if status_container:
             status_container.info(f"🤖 Summarizing chunk {idx}/{total} (reviews {((idx-1)*chunk_size)+1} - {min(idx*chunk_size, len(reviews))})...")
         if prog_bar:
-            prog_bar.progress(int(((idx - 1) / total) * 100))
+            prog_bar.progress(int(((idx - 1) / total) * 80) + 35)  # Progress from 35-80%
 
         prompt = chunk_prompt(product_name, specs, chunk)
         try:
