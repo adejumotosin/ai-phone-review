@@ -1,11 +1,3 @@
-# ==================================================
-# 📱 AI-Powered Phone Review Engine
-# Combines GSMArena specs + user reviews + Gemini AI
-# ==================================================
-
-# -----------------------------
-# 📦 Imports
-# -----------------------------
 import os
 import re
 import json
@@ -29,67 +21,44 @@ genai.configure(api_key=api_key)
 model = genai.GenerativeModel("gemini-1.5-flash")
 
 # -----------------------------
-# 🔗 Helpers: build review URL
-# -----------------------------
-def build_review_url(product_url: str) -> str:
-    """
-    Convert GSMArena product URL into its reviews URL.
-    Example:
-      input:  https://www.gsmarena.com/samsung_galaxy_s24_fe-13262.php
-      output: https://www.gsmarena.com/samsung_galaxy_s24_fe-reviews-13262.php
-    """
-    if not product_url or not product_url.endswith(".php"):
-        return None
-    try:
-        base, phone_id = product_url.rsplit("-", 1)
-        phone_id = phone_id.replace(".php", "")
-        return f"{base}-reviews-{phone_id}.php"
-    except Exception:
-        return None
-
-# -----------------------------
-# 🔎 Resolve GSMArena product URL
+# 1️⃣ GSMArena URL Resolver
 # -----------------------------
 @st.cache_data(ttl=86400, show_spinner="🔗 Finding GSMArena page...")
-def resolve_gsmarena_url(product_name: str):
-    """
-    Search GSMArena for a product and return (product_url, review_url).
-    """
+def resolve_gsmarena_url(product_name):
     try:
         query = product_name.replace(" ", "+")
         search_url = f"https://www.gsmarena.com/results.php3?sQuickSearch=yes&sName={query}"
-        headers = {"User-Agent": "Mozilla/5.0"}
 
+        headers = {"User-Agent": "Mozilla/5.0"}
         r = requests.get(search_url, headers=headers, timeout=10)
         r.raise_for_status()
         soup = BeautifulSoup(r.text, "html.parser")
 
-        # Try common selectors
-        link = soup.select_one(".makers a") or soup.select_one(".makers li a") or soup.select_one(".section-body .makers a")
+        link = soup.select_one(".makers a") or soup.select_one(".makers li a")
         if not link:
-            # as last resort try first php link on page
-            link = soup.select_one("a[href*='.php']")
-
-        if not link or "href" not in link.attrs:
             return None, None
 
         product_url = "https://www.gsmarena.com/" + link["href"]
-        review_url = build_review_url(product_url)
-        return product_url, review_url
-
+        return product_url, build_review_url(product_url)
     except Exception as e:
         st.warning(f"⚠️ GSMArena search failed: {e}")
         return None, None
 
 # -----------------------------
-# 📊 Fetch GSMArena specs
+# 2️⃣ Build Review URL
+# -----------------------------
+def build_review_url(product_url: str) -> str:
+    if not product_url or not product_url.endswith(".php"):
+        return None
+    base, phone_id = product_url.rsplit("-", 1)
+    phone_id = phone_id.replace(".php", "")
+    return f"{base}-reviews-{phone_id}.php"
+
+# -----------------------------
+# 3️⃣ Specs Scraper
 # -----------------------------
 @st.cache_data(ttl=86400, show_spinner="📊 Fetching specs...")
-def fetch_gsmarena_specs(url: str):
-    """
-    Scrape phone specs from GSMArena and normalize main fields.
-    Returns dict with keys like Display, Processor, RAM, Storage, Camera, Battery, OS.
-    """
+def fetch_gsmarena_specs(url):
     specs = {}
     key_map = {
         "Display": ["Display", "Screen", "Size"],
@@ -106,65 +75,35 @@ def fetch_gsmarena_specs(url: str):
         r.raise_for_status()
         soup = BeautifulSoup(r.text, "html.parser")
 
-        # Candidate containers/selectors
-        spec_containers = [
-            ".article-info table tr",
-            "#specs-list table tr",
-            "table.specs tr",
-            ".specs-brief-accent tr",
-        ]
-
-        spec_rows = []
-        for sel in spec_containers:
-            spec_rows = soup.select(sel)
-            if spec_rows:
-                break
-
+        spec_rows = soup.select(".article-info table tr") or soup.select("#specs-list table tr")
         for row in spec_rows:
-            th = row.find("td", class_="ttl") or row.find("th") or row.find("td", class_="spec-title")
+            th = row.find("td", class_="ttl") or row.find("th")
             td = row.find("td", class_="nfo") or (row.find_all("td")[-1] if row.find_all("td") else None)
             if not th or not td:
                 continue
             key = th.get_text(strip=True)
             val = td.get_text(" ", strip=True)
-
-            # Map to canonical fields
             for field, keywords in key_map.items():
                 if any(k.lower() in key.lower() for k in keywords):
-                    if field in ["RAM", "Storage"]:
-                        # extract GB numbers (handles "8GB/256GB" and similar)
-                        matches = re.findall(r"(\d+)\s*GB", val, flags=re.IGNORECASE)
-                        if matches:
+                    if field in ["RAM", "Storage"] and "GB" in val:
+                        gb_matches = re.findall(r'(\\d+)\\s*GB', val)
+                        if gb_matches:
                             if field == "RAM":
-                                specs["RAM"] = f"{matches[0]}GB RAM"
-                                # if multiple numbers present, next is probably storage
-                                if len(matches) > 1 and "Storage" not in specs:
-                                    specs["Storage"] = f"{matches[1]}GB Storage"
-                            else:
-                                specs["Storage"] = f"{matches[-1]}GB Storage"
-                        else:
-                            specs[field] = val
+                                specs["RAM"] = f"{gb_matches[0]}GB RAM"
+                            elif field == "Storage":
+                                specs["Storage"] = f"{gb_matches[-1]}GB Storage"
                     else:
                         specs[field] = val
                     break
-
     except Exception as e:
         st.warning(f"⚠️ GSMArena specs fetch failed: {e}")
-
-    # Ensure keys exist (fill with 'Not specified' if missing)
-    for k in ["Display", "Processor", "RAM", "Storage", "Camera", "Battery", "OS"]:
-        specs.setdefault(k, "Not specified")
     return specs
 
 # -----------------------------
-# 💬 Fetch GSMArena reviews (pagination-aware)
+# 4️⃣ Reviews Scraper (pagination)
 # -----------------------------
 @st.cache_data(ttl=21600, show_spinner="💬 Fetching GSMArena reviews...")
-def fetch_gsmarena_reviews(url: str, limit: int = 50):
-    """
-    Fetch user reviews from GSMArena review pages.
-    Automatically follows pagination via 'next' link until 'limit' reviews are collected.
-    """
+def fetch_gsmarena_reviews(url: str, limit: int = 1000):
     reviews = []
     if not url:
         return reviews
@@ -179,15 +118,7 @@ def fetch_gsmarena_reviews(url: str, limit: int = 50):
             r.raise_for_status()
             soup = BeautifulSoup(r.text, "html.parser")
 
-            # Try common review selectors (desktop & mobile)
-            review_blocks = []
-            # check for opinion blocks
-            review_blocks.extend(soup.select(".opin"))
-            review_blocks.extend(soup.select(".user-opinion"))
-            review_blocks.extend(soup.select(".uopin"))
-            review_blocks.extend(soup.select(".user-review"))
-            review_blocks.extend(soup.select(".review-item"))
-            # fallback to paragraphs in comments area
+            review_blocks = soup.select(".opin, .user-opinion, .uopin, .user-review, .review-item")
             if not review_blocks:
                 review_blocks = soup.select("#user-comments p, .thread p, .user-thread p, .post p, p")
 
@@ -200,25 +131,13 @@ def fetch_gsmarena_reviews(url: str, limit: int = 50):
                         if len(reviews) >= limit:
                             break
 
-            # Look for pagination 'next' link
+            # Pagination
             next_link = soup.select_one("a.pages-next") or soup.find("a", string=re.compile(r"next", re.I))
             if next_link and next_link.has_attr("href"):
                 href = next_link["href"]
-                # sometimes href is absolute or relative
-                if href.startswith("http"):
-                    page_url = href
-                else:
-                    page_url = "https://www.gsmarena.com/" + href.lstrip("/")
+                page_url = href if href.startswith("http") else "https://www.gsmarena.com/" + href.lstrip("/")
             else:
-                # try another pagination pattern: page param
-                # if url already has ?page=, increment it, else stop
-                m = re.search(r"[?&]page=(\d+)", page_url)
-                if m:
-                    current = int(m.group(1))
-                    page_url = re.sub(r"([?&]page=)\d+", r"\g<1>%d" % (current + 1), page_url)
-                else:
-                    # No next link and no page param -> stop
-                    page_url = None
+                page_url = None
 
     except Exception as e:
         st.warning(f"⚠️ GSMArena reviews fetch failed: {e}")
@@ -226,232 +145,87 @@ def fetch_gsmarena_reviews(url: str, limit: int = 50):
     return reviews[:limit]
 
 # -----------------------------
-# 🤖 Summarize with Gemini (safe JSON)
+# 5️⃣ Summarizer with Chunking
 # -----------------------------
 @st.cache_data(ttl=43200, show_spinner="🤖 Summarizing with Gemini...")
-def summarize_reviews(product_name: str, specs: dict, reviews: list):
-    """
-    Ask Gemini to produce a structured JSON summary combining specs and reviews.
-    Returns string (JSON text) or None on failure.
-    """
+def summarize_reviews(product_name, specs, reviews, chunk_size=200):
     try:
-        specs_context = "\n".join([f"{k}: {v}" for k, v in specs.items()]) if specs else "No specs found"
-        reviews_context = "\n".join([f"- {r[:200]}..." if len(r) > 200 else f"- {r}" for r in reviews[:20]]) if reviews else "No reviews found"
+        if not reviews:
+            reviews = []
 
-        prompt = f"""
-You are an AI Review Summarizer analyzing the {product_name}.
-Combine GSMArena official specs with real user reviews.
+        def build_prompt(product_name, specs, reviews_subset):
+            specs_context = "\\n".join([f"{k}: {v}" for k, v in specs.items()]) if specs else "No specs found"
+            reviews_context = "\\n".join([f"- {r}" for r in reviews_subset]) if reviews_subset else "No reviews found"
+            return f"""
+            You are an AI Review Summarizer analyzing the {product_name}.
+            Combine GSMArena official specs with real user reviews to create a comprehensive analysis.
 
-SPECS:
-{specs_context}
+            OFFICIAL SPECS:
+            {specs_context}
 
-REVIEWS:
-{reviews_context}
+            USER REVIEWS SAMPLE:
+            {reviews_context}
 
-Return valid JSON ONLY. Structure:
-{{
-  "verdict": "Brief rating (max 30 chars)",
-  "pros": ["..."],
-  "cons": ["..."],
-  "aspect_sentiments": [
-    {{"Aspect": "Camera", "Positive": 75, "Negative": 25}},
-    {{"Aspect": "Battery", "Positive": 80, "Negative": 20}},
-    {{"Aspect": "Performance", "Positive": 70, "Negative": 30}},
-    {{"Aspect": "Display", "Positive": 85, "Negative": 15}},
-    {{"Aspect": "Build Quality", "Positive": 65, "Negative": 35}}
-  ],
-  "user_quotes": ["quote1", "quote2", "quote3"],
-  "recommendation": "Target audience (max 35 chars)",
-  "bottom_line": "2-3 sentence final summary combining specs and user feedback",
-  "phone_specs": {{
-    "Display": "{specs.get('Display', 'Not specified')}",
-    "Processor": "{specs.get('Processor', 'Not specified')}",
-    "RAM": "{specs.get('RAM', 'Not specified')}",
-    "Storage": "{specs.get('Storage', 'Not specified')}",
-    "Camera": "{specs.get('Camera', 'Not specified')}",
-    "Battery": "{specs.get('Battery', 'Not specified')}",
-    "OS": "{specs.get('OS', 'Not specified')}"
-  }}
-}}
-"""
+            CRITICAL REQUIREMENTS:
+            - Always include all 7 spec fields: Display, Processor, RAM, Storage, Camera, Battery, OS
+            - If missing, mark as "Not specified"
+            - Verdict <30 chars, Recommendation <35 chars
+            - Extract real user quotes (2-4 sentences max each)
+            - Output ONLY valid JSON, no markdown
 
-        # Request JSON mime type; model may still include formatting—will clean after receiving.
-        response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
-        text = response.text.strip()
+            Expected JSON keys: verdict, pros, cons, aspect_sentiments, user_quotes, recommendation, bottom_line, phone_specs
+            """
 
-        # Remove triple-backtick fences if present
-        if text.startswith("```"):
-            text = re.sub(r"^```(json)?\s*|\s*```$", "", text, flags=re.IGNORECASE).strip()
+        chunks = [reviews[i:i + chunk_size] for i in range(0, len(reviews), chunk_size)]
+        partial_summaries = []
+        for chunk in chunks:
+            prompt = build_prompt(product_name, specs, chunk)
+            response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
+            try:
+                partial_json = json.loads(response.text)
+                partial_summaries.append(partial_json)
+            except Exception:
+                continue
 
-        return text
+        if not partial_summaries:
+            return None, None
+
+        merged = {
+            "verdict": partial_summaries[0].get("verdict", "N/A"),
+            "pros": list({p for s in partial_summaries for p in s.get("pros", [])}),
+            "cons": list({c for s in partial_summaries for c in s.get("cons", [])}),
+            "aspect_sentiments": partial_summaries[0].get("aspect_sentiments", []),
+            "user_quotes": [q for s in partial_summaries for q in s.get("user_quotes", [])][:6],
+            "recommendation": partial_summaries[0].get("recommendation", "N/A"),
+            "bottom_line": " ".join(s.get("bottom_line", "") for s in partial_summaries)[:500],
+            "phone_specs": specs or partial_summaries[0].get("phone_specs", {})
+        }
+
+        reviews_hash = hashlib.md5(("".join(reviews) + str(specs)).encode("utf-8")).hexdigest()
+        return json.dumps(merged, ensure_ascii=False), reviews_hash
 
     except Exception as e:
         st.error(f"⚠️ Gemini API error: {e}")
-        return None
+        return None, None
 
 # -----------------------------
-# 🎨 Streamlit UI
+# 6️⃣ Streamlit UI
 # -----------------------------
-st.set_page_config(page_title="AI Review Engine", page_icon="📱", layout="wide")
+st.set_page_config(page_title="📱 AI Phone Review Summarizer", layout="wide")
+st.title("📱 AI Phone Review Summarizer")
 
-# Custom CSS metric-card (keeps it compact)
-st.markdown("""
-<style>
-.metric-card { background-color: #0b0b0b; padding: 1rem; border-radius: 0.5rem; margin-bottom: 1rem; color: white; }
-.metric-title-box { color: white; padding: 0.25rem 0.5rem; border-radius: 0.25rem; display: inline-block; margin-bottom: 0.5rem; }
-.metric-verdict .metric-title-box { background-color: #ff6b35; }
-.metric-best-for .metric-title-box { background-color: #1f77b4; }
-.metric-data-found .metric-title-box { background-color: #28a745; }
-.metric-card p { word-wrap: break-word; overflow-wrap: break-word; margin: 0; color: white; }
-</style>
-""", unsafe_allow_html=True)
+product_name = st.text_input("Enter phone model (e.g. Samsung Galaxy S24 FE)")
+review_limit = st.sidebar.slider("Max reviews to analyze", 50, 1000, 200, step=50)
 
-st.title("📱 AI-Powered Phone Review Engine")
-st.markdown("Get a **comprehensive analysis** combining GSMArena specs with real user reviews.")
-
-# Sidebar
-st.sidebar.header("⚙️ Settings")
-review_limit = st.sidebar.slider("Max reviews to analyze", 10, 200, 50, step=10)
-include_raw = st.sidebar.checkbox("Show raw AI output", value=False)
-
-# Input
-phone = st.text_input("Enter phone name", value="Samsung Galaxy S24")
-analyze_btn = st.button("🔍 Analyze Phone", type="primary")
-
-# Main flow
-if analyze_btn and phone:
-    progress = st.progress(0)
-    status = st.empty()
-
-    status.text("🔎 Resolving GSMArena URLs...")
-    product_url, review_url = resolve_gsmarena_url(phone)
-    progress.progress(10)
-
-    if not product_url:
-        st.error(f"❌ Could not find '{phone}' on GSMArena. Try a more specific model name.")
-        status.empty()
-        progress.empty()
-        st.stop()
-
-    st.success(f"✅ Found product page: {product_url}")
-    if review_url:
-        st.success(f"✅ Using reviews page: {review_url}")
-    else:
-        st.warning("⚠️ Could not construct review URL automatically; proceeding with specs only.")
-
-    status.text("📊 Fetching specs...")
-    specs = fetch_gsmarena_specs(product_url)
-    progress.progress(30)
-
-    status.text("💬 Fetching user reviews (may take a few seconds)...")
+if product_name:
+    product_url, review_url = resolve_gsmarena_url(product_name)
+    specs = fetch_gsmarena_specs(product_url) if product_url else {}
     reviews = fetch_gsmarena_reviews(review_url, limit=review_limit) if review_url else []
-    progress.progress(60)
-    if reviews:
-        st.success(f"✅ Collected {len(reviews)} reviews")
+
+    summary_json, _ = summarize_reviews(product_name, specs, reviews)
+    if summary_json:
+        summary = json.loads(summary_json)
+        st.subheader(f"📊 AI Summary for {product_name}")
+        st.write(summary)
     else:
-        st.info("ℹ️ No reviews collected; analysis will rely mainly on specs.")
-
-    status.text("🤖 Generating AI summary...")
-    summary_text = summarize_reviews(phone, specs, reviews)
-    progress.progress(90)
-
-    if not summary_text:
-        st.error("⚠️ Failed to generate AI summary. See logs or try again.")
-        status.empty()
-        progress.empty()
-        st.stop()
-
-    # Try to parse JSON safely
-    try:
-        summary = json.loads(summary_text)
-    except json.JSONDecodeError:
-        # Some models include trailing text — try to extract JSON object via regex
-        try:
-            match = re.search(r"\{(?:.*\n*)*\}", summary_text)
-            if match:
-                summary = json.loads(match.group(0))
-            else:
-                raise
-        except Exception as e:
-            st.error("⚠️ Could not parse AI JSON output.")
-            if include_raw:
-                with st.expander("Raw AI Output"):
-                    st.text_area("AI Output", summary_text, height=300)
-            status.empty()
-            progress.empty()
-            st.stop()
-
-    progress.progress(100)
-    status.empty()
-    progress.empty()
-
-    # Display results
-    st.markdown("---")
-    st.subheader(f"📝 Analysis: {phone}")
-
-    # Metric cards
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.markdown(f"""
-        <div class="metric-card metric-verdict">
-            <span class="metric-title-box">⭐ Verdict</span>
-            <p style="font-size:1.1rem;font-weight:600;">{summary.get('verdict','N/A')}</p>
-        </div>
-        """, unsafe_allow_html=True)
-    with col2:
-        st.markdown(f"""
-        <div class="metric-card metric-best-for">
-            <span class="metric-title-box">🎯 Best For</span>
-            <p style="font-size:1.1rem;font-weight:600;">{summary.get('recommendation','N/A')}</p>
-        </div>
-        """, unsafe_allow_html=True)
-    with col3:
-        st.markdown(f"""
-        <div class="metric-card metric-data-found">
-            <span class="metric-title-box">📊 Data Found</span>
-            <p style="font-size:1.1rem;font-weight:600;">{len(specs)} specs, {len(reviews)} reviews</p>
-        </div>
-        """, unsafe_allow_html=True)
-
-    # Bottom line
-    st.markdown("### 🎯 Bottom Line")
-    st.info(summary.get("bottom_line", "No summary available."))
-
-    # Main two-column content
-    c1, c2 = st.columns([0.6, 0.4])
-    with c1:
-        if "phone_specs" in summary and summary["phone_specs"]:
-            st.markdown("### 🔧 Technical Specifications")
-            spec_df = pd.DataFrame(list(summary["phone_specs"].items()), columns=["Component", "Details"])
-            st.table(spec_df)
-
-        if "aspect_sentiments" in summary and summary["aspect_sentiments"]:
-            st.markdown("### 📊 User Sentiment Analysis")
-            df_aspects = pd.DataFrame(summary["aspect_sentiments"])
-            if not df_aspects.empty and "Aspect" in df_aspects.columns:
-                df_chart = df_aspects.set_index("Aspect")[["Positive", "Negative"]]
-                st.bar_chart(df_chart, height=320)
-
-    with c2:
-        st.markdown("### ✅ Strengths")
-        for p in summary.get("pros", []):
-            st.success(f"✓ {p}")
-
-        st.markdown("### ⚠️ Weaknesses")
-        for con in summary.get("cons", []):
-            st.error(f"✗ {con}")
-
-    # Quotes
-    if summary.get("user_quotes"):
-        st.markdown("### 💬 What Users Are Saying")
-        for i, q in enumerate(summary.get("user_quotes", []), 1):
-            st.info(f"**User {i}:** {q}")
-
-    # Footer / Downloads
-    st.markdown("---")
-    st.markdown("**Data Sources:** GSMArena specifications & user reviews | **AI Analysis:** Google Gemini")
-    st.download_button("📥 Download JSON", json.dumps(summary, indent=2), f"{phone.replace(' ', '_')}_analysis.json", "application/json")
-
-    if include_raw:
-        with st.expander("Raw AI Output"):
-            st.text_area("AI Output", summary_text, height=250)
+        st.error("Failed to generate summary.")
