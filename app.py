@@ -15,24 +15,27 @@ from bs4 import BeautifulSoup
 import google.generativeai as genai
 from urllib.parse import urljoin, urlparse, parse_qs, urlencode
 
-# API Test - add this after configuring genai
-try:
-    test_response = model.generate_content("Say 'API works'")
-    st.sidebar.success(f"✅ API Test: {test_response.text}")
-except Exception as e:
-    st.sidebar.error(f"❌ API Test Failed: {e}")
-
 # -----------------------------
 # Configure Gemini (Google) SDK
 # -----------------------------
-api_key = st.secrets.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
-if not api_key:
-    st.error("❌ Missing Gemini API key. Please set GEMINI_API_KEY in secrets or env vars.")
-    st.stop()
+try:
+    api_key = st.secrets.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        st.error("❌ Missing Gemini API key. Please set GEMINI_API_KEY in secrets or env vars.")
+        st.stop()
 
-genai.configure(api_key=api_key)
-# create a model handle
-model = genai.GenerativeModel("gemini-1.5-flash")
+    genai.configure(api_key=api_key)
+    # create a model handle
+    model = genai.GenerativeModel("gemini-1.5-flash")
+    
+    # Test the model
+    st.sidebar.info("Testing Gemini API connection...")
+    test_resp = model.generate_content("Reply with just: OK")
+    st.sidebar.success(f"✅ Gemini API Connected: {test_resp.text[:50]}")
+except Exception as e:
+    st.sidebar.error(f"❌ Gemini API Setup Failed: {e}")
+    st.error(f"Failed to initialize Gemini model: {e}")
+    st.stop()
 
 # -----------------------------
 # Helpers: safe json loader
@@ -459,10 +462,12 @@ def create_fallback_summary(product_name: str, specs: dict, reviews: list):
 # Continue with Part 2 for summarization pipeline and UI
 
 
-
 # app.py - PART 2 OF 2
 # This file contains: summarization pipeline and Streamlit UI
 # IMPORTANT: This continues from Part 1 - combine both parts into one app.py file
+
+# Import model from Part 1 (should be defined after genai configuration)
+# If running as separate files, you'll need to ensure model is accessible
 
 # -----------------------------
 # Summarization pipeline (chunked) with progress
@@ -515,6 +520,7 @@ def summarize_reviews_chunked(product_name: str, specs: dict, reviews: list, chu
         
         # Retry logic for failed chunks
         max_retries = 2
+        chunk_success = False
         for attempt in range(max_retries):
             try:
                 resp = model.generate_content(
@@ -525,7 +531,28 @@ def summarize_reviews_chunked(product_name: str, specs: dict, reviews: list, chu
                         "max_output_tokens": 2048
                     }
                 )
+                
+                # Check if response is valid
+                if not resp or not hasattr(resp, 'text'):
+                    if status_container:
+                        status_container.error(f"❌ Chunk {idx}: Empty response from Gemini API")
+                    if attempt < max_retries - 1:
+                        time.sleep(2)
+                        continue
+                    else:
+                        break
+                
                 text = resp.text.strip()
+                
+                if not text:
+                    if status_container:
+                        status_container.error(f"❌ Chunk {idx}: Gemini returned empty text")
+                    if attempt < max_retries - 1:
+                        time.sleep(2)
+                        continue
+                    else:
+                        break
+                
                 # if the model returned fenced code, strip fences
                 if text.startswith("```"):
                     text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.IGNORECASE).strip()
@@ -534,26 +561,37 @@ def summarize_reviews_chunked(product_name: str, specs: dict, reviews: list, chu
                 test_json = safe_load_json(text)
                 if test_json:
                     partial_texts.append(text)
+                    chunk_success = True
+                    if status_container:
+                        status_container.success(f"✅ Chunk {idx} processed successfully")
                     break  # Success
-                elif attempt < max_retries - 1:
-                    if status_container:
-                        status_container.warning(f"Chunk {idx} returned invalid JSON, retrying...")
-                    time.sleep(1)
                 else:
-                    # Last attempt failed, use empty object
-                    partial_texts.append("{}")
                     if status_container:
-                        status_container.warning(f"Chunk {idx} failed after retries")
+                        status_container.error(f"❌ Chunk {idx}: Invalid JSON returned. First 200 chars: {text[:200]}")
+                    if attempt < max_retries - 1:
+                        time.sleep(2)
+                    
             except Exception as e:
+                error_msg = str(e)
+                if status_container:
+                    status_container.error(f"❌ Chunk {idx} attempt {attempt+1} error: {error_msg}")
+                
+                # Check for specific error types
+                if "quota" in error_msg.lower() or "429" in error_msg:
+                    st.error("🚫 **API Quota Exceeded!** You've hit your Gemini API limit. Wait or upgrade your quota.")
+                    return create_fallback_summary(product_name, specs, reviews)
+                elif "401" in error_msg or "403" in error_msg:
+                    st.error("🔑 **API Key Error!** Check your GEMINI_API_KEY is valid and has proper permissions.")
+                    return create_fallback_summary(product_name, specs, reviews)
+                
                 if attempt < max_retries - 1:
-                    if status_container:
-                        status_container.warning(f"Chunk {idx} error: {e}, retrying...")
-                    time.sleep(1)
-                else:
-                    # store failure marker and continue
-                    partial_texts.append("{}")
-                    if status_container:
-                        status_container.warning(f"Chunk {idx} failed: {e}")
+                    time.sleep(2)
+        
+        # If chunk failed after all retries
+        if not chunk_success:
+            partial_texts.append("{}")
+            if status_container:
+                status_container.warning(f"⚠️ Chunk {idx} skipped after {max_retries} attempts")
         
         time.sleep(0.3)  # Rate limiting delay
 
@@ -578,6 +616,9 @@ def summarize_reviews_chunked(product_name: str, specs: dict, reviews: list, chu
     max_merge_retries = 3
     for merge_attempt in range(max_merge_retries):
         try:
+            if status_container:
+                status_container.info(f"🔄 Merge attempt {merge_attempt + 1}/{max_merge_retries}...")
+            
             merge_resp = model.generate_content(
                 merge_prompt, 
                 generation_config={
@@ -586,7 +627,27 @@ def summarize_reviews_chunked(product_name: str, specs: dict, reviews: list, chu
                     "max_output_tokens": 4096
                 }
             )
+            
+            if not merge_resp or not hasattr(merge_resp, 'text'):
+                if status_container:
+                    status_container.error(f"❌ Merge attempt {merge_attempt + 1}: Empty response from API")
+                if merge_attempt < max_merge_retries - 1:
+                    time.sleep(3)
+                    continue
+                else:
+                    return create_fallback_summary(product_name, specs, reviews)
+            
             final_text = merge_resp.text.strip()
+            
+            if not final_text:
+                if status_container:
+                    status_container.error(f"❌ Merge attempt {merge_attempt + 1}: Empty text returned")
+                if merge_attempt < max_merge_retries - 1:
+                    time.sleep(3)
+                    continue
+                else:
+                    return create_fallback_summary(product_name, specs, reviews)
+            
             # strip fences if present
             if final_text.startswith("```"):
                 final_text = re.sub(r"^```(?:json)?\s*|\s*```$", "", final_text, flags=re.IGNORECASE).strip()
@@ -596,25 +657,27 @@ def summarize_reviews_chunked(product_name: str, specs: dict, reviews: list, chu
             if test_final:
                 if prog_bar:
                     prog_bar.progress(95)
+                if status_container:
+                    status_container.success("✅ Successfully merged all chunks!")
                 return final_text
-            elif merge_attempt < max_merge_retries - 1:
-                if status_container:
-                    status_container.warning(f"Merge attempt {merge_attempt + 1} produced invalid JSON, retrying...")
-                time.sleep(2)
             else:
                 if status_container:
-                    status_container.error("All merge attempts failed, using fallback")
-                return create_fallback_summary(product_name, specs, reviews)
-                
+                    status_container.error(f"❌ Merge attempt {merge_attempt + 1}: Invalid JSON. First 300 chars: {final_text[:300]}")
+                if merge_attempt < max_merge_retries - 1:
+                    time.sleep(3)
+                    
         except Exception as e:
-            if merge_attempt < max_merge_retries - 1:
-                if status_container:
-                    status_container.warning(f"Merge attempt {merge_attempt + 1} failed: {e}, retrying...")
-                time.sleep(2)
-            else:
-                if status_container:
-                    status_container.error(f"Final merge failed after all retries: {e}")
+            error_msg = str(e)
+            if status_container:
+                status_container.error(f"❌ Merge attempt {merge_attempt + 1} exception: {error_msg}")
+            
+            # Check for API errors
+            if "quota" in error_msg.lower() or "429" in error_msg:
+                st.error("🚫 **API Quota Exceeded during merge!** Using fallback summary.")
                 return create_fallback_summary(product_name, specs, reviews)
+            
+            if merge_attempt < max_merge_retries - 1:
+                time.sleep(3)
     
     # Fallback if loop completes without return
     return create_fallback_summary(product_name, specs, reviews)
