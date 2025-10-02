@@ -26,28 +26,46 @@ try:
 
     genai.configure(api_key=api_key)
     
-    # Try different model names in order of preference
+    # v1beta uses different model names - try both v1 and v1beta compatible names
     model_names = [
-        "gemini-1.5-flash-latest",
-        "gemini-1.5-flash",
-        "gemini-pro",
-        "gemini-1.0-pro"
+        "models/gemini-1.5-flash",
+        "models/gemini-1.5-pro",
+        "models/gemini-pro",
+        "gemini-1.5-flash-002",
+        "gemini-1.5-flash-001",
+        "gemini-pro-latest",
     ]
     
     model = None
     for model_name in model_names:
         try:
             test_model = genai.GenerativeModel(model_name)
-            test_resp = test_model.generate_content("Reply with just: OK")
+            test_resp = test_model.generate_content("Reply with: OK")
             model = test_model
             st.sidebar.success(f"✅ Connected to {model_name}: {test_resp.text[:50]}")
             break
         except Exception as e:
-            st.sidebar.warning(f"⚠️ {model_name} not available: {str(e)[:100]}")
             continue
     
     if not model:
-        raise Exception("No available Gemini models found. Check your API key permissions.")
+        # Last resort - try to list available models
+        st.sidebar.error("Checking available models...")
+        try:
+            available_models = genai.list_models()
+            model_list = [m.name for m in available_models if 'generateContent' in m.supported_generation_methods]
+            st.sidebar.info(f"Available models: {', '.join(model_list[:5])}")
+            
+            if model_list:
+                # Try first available model
+                test_model = genai.GenerativeModel(model_list[0])
+                test_resp = test_model.generate_content("Reply with: OK")
+                model = test_model
+                st.sidebar.success(f"✅ Using {model_list[0]}")
+        except Exception as list_error:
+            st.sidebar.error(f"Failed to list models: {list_error}")
+    
+    if not model:
+        raise Exception("No available Gemini models found. Your API key may not have access to generative models.")
 except Exception as e:
     st.sidebar.error(f"❌ Gemini API Setup Failed: {e}")
     st.error(f"Failed to initialize Gemini model: {e}")
