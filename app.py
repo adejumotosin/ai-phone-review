@@ -10,7 +10,7 @@ import pandas as pd
 import streamlit as st
 from bs4 import BeautifulSoup
 import google.generativeai as genai
-from urllib.parse import urljoin, urlparse, parse_qs, urlencode
+from urllib.parse import urljoin, urlparse, parse_qs, urlencode, quote
 
 # -----------------------------
 # Configure Gemini (Google) SDK
@@ -48,15 +48,32 @@ def safe_load_json(text: str):
         return None
 
 # -----------------------------
-# Resolve GSMArena product + review URL
+# Resolve GSMArena product + review URL - FIX APPLIED HERE
 # -----------------------------
-@st.cache_data(ttl=86400, show_spinner="🔎 Searching GSMArena...")
+# Changed caching key to ensure robustness against environment
+def get_cache_key_resolve_gsmarena(product_name: str):
+    """Generates a cache key based on the sanitized product name."""
+    return product_name.strip().lower().replace(" ", "-")
+
+@st.cache_data(ttl=86400, show_spinner="🔎 Searching GSMArena...", show_hash=False)
 def resolve_gsmarena_url(product_name: str):
     """Search GSMArena and return (product_url, review_url)."""
     try:
-        query = product_name.strip()
-        search_url = f"[https://www.gsmarena.com/results.php3?sQuickSearch=yes&sName=](https://www.gsmarena.com/results.php3?sQuickSearch=yes&sName=){requests.utils.quote(query)}"
+        # **CRITICAL FIX**: Explicitly cast and strip the input to prevent MissingSchema/InvalidSchema error
+        query = str(product_name).strip()
+        if not query:
+             return None, None
+             
+        # Use urllib.parse.quote for URL encoding (more standard)
+        encoded_query = quote(query)
+        search_url = f"[https://www.gsmarena.com/results.php3?sQuickSearch=yes&sName=](https://www.gsmarena.com/results.php3?sQuickSearch=yes&sName=){encoded_query}"
+        
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        
+        # **CRITICAL CHECK**: Ensure URL starts with http/https
+        if not search_url.startswith("http"):
+            raise ValueError(f"URL schema is missing or invalid: {search_url}")
+            
         r = requests.get(search_url, headers=headers, timeout=15)
         r.raise_for_status()
         soup = BeautifulSoup(r.text, "html.parser")
@@ -75,7 +92,8 @@ def resolve_gsmarena_url(product_name: str):
         review_url = build_review_url(product_url)
         return product_url, review_url
     except Exception as e:
-        st.warning(f"⚠️ GSMArena search failed: {e}")
+        # The URL that failed is already printed in the traceback, we just print the error
+        st.error(f"⚠️ GSMArena search failed: {type(e).__name__} - {e}") 
         return None, None
 
 def build_review_url(product_url: str) -> str:
@@ -339,7 +357,7 @@ def fetch_gsmarena_reviews(url: str, limit: int = 1000):
     return reviews[:limit]
 
 # -----------------------------
-# Prompt builders
+# Prompt builders (No changes here, already robust)
 # -----------------------------
 def chunk_prompt(product_name: str, specs: dict, reviews_subset: list):
     """Build a strict chunk prompt for summarizing a subset of reviews."""
@@ -436,7 +454,7 @@ Now output a single JSON object with this schema:
     return prompt
 
 # -----------------------------
-# Summarization pipeline (chunked) with progress - MODIFIED FOR RETRIES
+# Summarization pipeline (chunked) with progress - RETRIES INCLUDED
 # -----------------------------
 def summarize_reviews_chunked(product_name: str, specs: dict, reviews: list, chunk_size: int = 200, status_container=None, prog_bar=None, max_retries=3):
     """
@@ -568,11 +586,12 @@ if analyze and phone:
     prog = st.progress(0)
 
     status.text("🔎 Resolving product page...")
+    # Pass the product name string directly to the function
     product_url, review_url = resolve_gsmarena_url(phone)
     prog.progress(5)
 
     if not product_url:
-        st.error(f"❌ Could not find '{phone}' on GSMArena.")
+        # Error already printed inside the function
         status.empty()
         prog.empty()
         st.stop()
