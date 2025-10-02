@@ -15,6 +15,13 @@ from bs4 import BeautifulSoup
 import google.generativeai as genai
 from urllib.parse import urljoin, urlparse, parse_qs, urlencode
 
+# API Test - add this after configuring genai
+try:
+    test_response = model.generate_content("Say 'API works'")
+    st.sidebar.success(f"✅ API Test: {test_response.text}")
+except Exception as e:
+    st.sidebar.error(f"❌ API Test Failed: {e}")
+
 # -----------------------------
 # Configure Gemini (Google) SDK
 # -----------------------------
