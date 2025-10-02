@@ -25,13 +25,29 @@ try:
         st.stop()
 
     genai.configure(api_key=api_key)
-    # create a model handle
-    model = genai.GenerativeModel("gemini-1.5-flash")
     
-    # Test the model
-    st.sidebar.info("Testing Gemini API connection...")
-    test_resp = model.generate_content("Reply with just: OK")
-    st.sidebar.success(f"✅ Gemini API Connected: {test_resp.text[:50]}")
+    # Try different model names in order of preference
+    model_names = [
+        "gemini-1.5-flash-latest",
+        "gemini-1.5-flash",
+        "gemini-pro",
+        "gemini-1.0-pro"
+    ]
+    
+    model = None
+    for model_name in model_names:
+        try:
+            test_model = genai.GenerativeModel(model_name)
+            test_resp = test_model.generate_content("Reply with just: OK")
+            model = test_model
+            st.sidebar.success(f"✅ Connected to {model_name}: {test_resp.text[:50]}")
+            break
+        except Exception as e:
+            st.sidebar.warning(f"⚠️ {model_name} not available: {str(e)[:100]}")
+            continue
+    
+    if not model:
+        raise Exception("No available Gemini models found. Check your API key permissions.")
 except Exception as e:
     st.sidebar.error(f"❌ Gemini API Setup Failed: {e}")
     st.error(f"Failed to initialize Gemini model: {e}")
@@ -460,7 +476,6 @@ def create_fallback_summary(product_name: str, specs: dict, reviews: list):
 
 # END OF PART 1
 # Continue with Part 2 for summarization pipeline and UI
-
 
 # app.py - PART 2 OF 2
 # This file contains: summarization pipeline and Streamlit UI
