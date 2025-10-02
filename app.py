@@ -29,14 +29,21 @@ model = genai.GenerativeModel("gemini-1.5-flash")
 # -----------------------------
 def safe_load_json(text: str):
     """Try to load JSON; if fails, extract first {...} block and try again."""
+    if not text:
+        return None
     try:
         return json.loads(text)
     except json.JSONDecodeError:
+        # First, strip non-JSON output (like "```json" fences)
+        text = re.sub(r"^\s*```(?:json)?\s*|\s*```\s*$", "", text, flags=re.IGNORECASE | re.DOTALL).strip()
+        
+        # Then, try to find the first complete JSON object
         m = re.search(r"\{(?:.|\n)*\}", text)
         if m:
             try:
                 return json.loads(m.group(0))
             except Exception:
+                # If regex-extracted block still fails, return None
                 return None
         return None
 
@@ -48,7 +55,7 @@ def resolve_gsmarena_url(product_name: str):
     """Search GSMArena and return (product_url, review_url)."""
     try:
         query = product_name.strip()
-        search_url = f"https://www.gsmarena.com/results.php3?sQuickSearch=yes&sName={requests.utils.quote(query)}"
+        search_url = f"[https://www.gsmarena.com/results.php3?sQuickSearch=yes&sName=](https://www.gsmarena.com/results.php3?sQuickSearch=yes&sName=){requests.utils.quote(query)}"
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
         r = requests.get(search_url, headers=headers, timeout=15)
         r.raise_for_status()
@@ -63,7 +70,7 @@ def resolve_gsmarena_url(product_name: str):
             return None, None
 
         product_href = link["href"]
-        product_url = "https://www.gsmarena.com/" + product_href
+        product_url = "[https://www.gsmarena.com/](https://www.gsmarena.com/)" + product_href
         # Build review URL reliably
         review_url = build_review_url(product_url)
         return product_url, review_url
@@ -142,7 +149,7 @@ def fetch_gsmarena_specs(url: str):
     return specs
 
 # -----------------------------
-# FIXED: Reviews scraper with better pagination detection
+# Reviews scraper with better pagination detection
 # -----------------------------
 @st.cache_data(ttl=21600, show_spinner="💬 Fetching user reviews...")
 def fetch_gsmarena_reviews(url: str, limit: int = 1000):
@@ -316,7 +323,8 @@ def fetch_gsmarena_reviews(url: str, limit: int = 1000):
                 if href.startswith("http"):
                     page_url = href
                 else:
-                    page_url = urljoin("https://www.gsmarena.com/", href)
+                    # Use urljoin to handle relative paths reliably
+                    page_url = urljoin(url, href)
                 st.info(f"🔗 Found next page: {page_url}")
             else:
                 st.info("🏁 No more pagination links found")
@@ -335,9 +343,16 @@ def fetch_gsmarena_reviews(url: str, limit: int = 1000):
 # -----------------------------
 def chunk_prompt(product_name: str, specs: dict, reviews_subset: list):
     """Build a strict chunk prompt for summarizing a subset of reviews."""
+    # Ensure specs are used only if available
     specs_context = "\n".join([f"{k}: {v}" for k, v in specs.items()]) if specs else "No specs found"
     reviews_context = "\n".join([f"- {r}" for r in reviews_subset]) if reviews_subset else "No reviews found"
 
+    # Use dict comprehension for dynamic spec insertion into the schema example
+    phone_specs_schema = ",\n".join([
+        f'    "{k}": "{{specs.get(\'{k}\', \'Not specified\')}}"' for k in 
+        ["Display", "Processor", "RAM", "Storage", "Camera", "Battery", "OS"]
+    ])
+    
     prompt = f"""
 You are an AI Review Summarizer analyzing the {product_name}.
 Combine GSMArena official specs with real user reviews to create a concise structured JSON summary.
@@ -349,7 +364,7 @@ REVIEWS SAMPLE:
 {reviews_context}
 
 OUTPUT RULES:
-- Return ONLY valid JSON (no markdown, no commentary).
+- Return ONLY valid JSON (no markdown, no commentary, no backticks).
 - Do not split or spell words character-by-character.
 - Arrays (pros, cons, user_quotes) must be JSON arrays of full strings, e.g. ["Great battery", "Sharp display"].
 - Keep 'verdict' under 30 characters and 'recommendation' under 35 characters.
@@ -360,8 +375,8 @@ OUTPUT RULES:
 Return a JSON object matching this example schema:
 {{
   "verdict": "Short verdict",
-  "pros": ["..."],
-  "cons": ["..."],
+  "pros": ["...", "..."],
+  "cons": ["...", "..."],
   "aspect_sentiments": [
     {{"Aspect":"Camera","Positive":70,"Negative":30}},
     {{"Aspect":"Battery","Positive":80,"Negative":20}}
@@ -370,13 +385,7 @@ Return a JSON object matching this example schema:
   "recommendation": "Short target audience",
   "bottom_line": "2-sentence final summary",
   "phone_specs": {{
-    "Display": "{specs.get('Display', 'Not specified')}",
-    "Processor": "{specs.get('Processor', 'Not specified')}",
-    "RAM": "{specs.get('RAM', 'Not specified')}",
-    "Storage": "{specs.get('Storage', 'Not specified')}",
-    "Camera": "{specs.get('Camera', 'Not specified')}",
-    "Battery": "{specs.get('Battery', 'Not specified')}",
-    "OS": "{specs.get('OS', 'Not specified')}"
+{phone_specs_schema}
   }}
 }}
 """
@@ -388,17 +397,24 @@ def final_merge_prompt(product_name: str, specs: dict, partial_texts: list):
     This prompt is strict to avoid character-splitting.
     """
     joined = "\n\n---- PARTIAL SUMMARY ----\n\n".join(partial_texts)
+    
+    # Use dict comprehension for dynamic spec insertion into the schema example
+    phone_specs_schema = ",\n".join([
+        f'    "{k}": "{specs.get(k, "Not specified")}"' for k in 
+        ["Display", "Processor", "RAM", "Storage", "Camera", "Battery", "OS"]
+    ])
+    
     prompt = f"""
 You are an AI assistant. You are given multiple JSON partial analyses for the same phone ({product_name}).
 Each partial analysis is valid JSON (or near-JSON). Your job: MERGE them into ONE VALID JSON object that exactly matches the schema below.
 
 Requirements:
-- Return ONLY valid JSON (no explanation).
+- Return ONLY valid JSON (no explanation, no commentary, no backticks).
 - Ensure 'pros' and 'cons' are arrays of short phrases (not single characters).
 - Deduplicate pros/cons while keeping meaningful phrases.
 - Aggregate user quotes (2-6 unique quotes).
 - For aspect_sentiments, combine by taking the arithmetic mean of Positive and Negative across partials for each Aspect (round to nearest integer).
-- Ensure phone_specs has all 7 fields; prefer the scraped specs if provided.
+- Ensure phone_specs has all 7 fields; use the provided scraped specs as the primary source for these values.
 
 Partial analyses:
 {joined}
@@ -406,87 +422,129 @@ Partial analyses:
 Now output a single JSON object with this schema:
 {{
   "verdict": "Short verdict under 30 chars",
-  "pros": ["..."],
-  "cons": ["..."],
+  "pros": ["...","..."],
+  "cons": ["...","..."],
   "aspect_sentiments": [{{"Aspect":"Camera","Positive":70,"Negative":30}},{{"Aspect":"Battery","Positive":80,"Negative":20}}],
   "user_quotes": ["quote1","quote2"],
   "recommendation": "short target audience under 35 chars",
   "bottom_line": "2-3 sentence final summary combining specs & reviews",
   "phone_specs": {{
-    "Display":"...","Processor":"...","RAM":"...","Storage":"...","Camera":"...","Battery":"...","OS":"..."
+{phone_specs_schema}
   }}
 }}
 """
     return prompt
 
 # -----------------------------
-# Summarization pipeline (chunked) with progress
+# Summarization pipeline (chunked) with progress - MODIFIED FOR RETRIES
 # -----------------------------
-def summarize_reviews_chunked(product_name: str, specs: dict, reviews: list, chunk_size: int = 200, status_container=None, prog_bar=None):
+def summarize_reviews_chunked(product_name: str, specs: dict, reviews: list, chunk_size: int = 200, status_container=None, prog_bar=None, max_retries=3):
     """
     Summarize reviews by chunking and then merging partial summaries.
-    status_container: optional st.empty() for status messages
-    prog_bar: optional st.progress() to update chunk progress
+    INCLUDES RETRY LOGIC for API stability.
     Returns JSON string (final merged JSON) or None
     """
+    
+    # ------------------
+    # Case 1: No Reviews (Specs only)
+    # ------------------
     if not reviews:
-        # still ask model to produce a summary from specs only
-        try:
-            prompt = chunk_prompt(product_name, specs, [])
-            resp = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
-            final_text = resp.text.strip()
-            return final_text
-        except Exception as e:
-            if status_container:
-                status_container.error(f"Gemini error: {e}")
-            return None
+        status_container.info("🤖 Generating summary from specs only (No reviews found)...")
+        for attempt in range(max_retries):
+            try:
+                prompt = chunk_prompt(product_name, specs, [])
+                resp = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
+                final_text = resp.text.strip()
+                if safe_load_json(final_text):
+                    return final_text
+                else:
+                    raise ValueError("Model did not return valid JSON despite request.")
+            except Exception as e:
+                if status_container:
+                    status_container.warning(f"⚠️ Specs-only summary failed (Attempt {attempt + 1}/{max_retries}): {e}")
+                if attempt + 1 == max_retries:
+                    return None
+                time.sleep(2 * (attempt + 1))  # Exponential backoff
+        return None
 
-    # split reviews into chunks
+    # ------------------
+    # Case 2: Chunked Summarization
+    # ------------------
     chunks = [reviews[i:i + chunk_size] for i in range(0, len(reviews), chunk_size)]
     partial_texts = []
-
     total = len(chunks)
+
     for idx, chunk in enumerate(chunks, start=1):
-        if status_container:
-            status_container.info(f"🤖 Summarizing chunk {idx}/{total} (reviews {((idx-1)*chunk_size)+1} - {min(idx*chunk_size, len(reviews))})...")
         if prog_bar:
-            prog_bar.progress(int(((idx - 1) / total) * 80) + 35)  # Progress from 35-80%
+            # Progress from 35-90% during chunk processing
+            prog_bar.progress(int(((idx - 1) / total) * 55) + 35) 
 
-        prompt = chunk_prompt(product_name, specs, chunk)
-        try:
-            resp = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
-            text = resp.text.strip()
-            # if the model returned fenced code, strip fences
-            if text.startswith("```"):
-                text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.IGNORECASE).strip()
-            # store raw chunk output (we'll merge later)
-            partial_texts.append(text)
-        except Exception as e:
-            # store failure marker and continue
-            partial_texts.append("{}")
-            if status_container:
-                status_container.warning(f"Chunk {idx} failed: {e}")
-        time.sleep(0.2)  # small delay between calls
+        for attempt in range(max_retries):
+            status_container.info(f"🤖 Summarizing chunk {idx}/{total} (Attempt {attempt + 1}/{max_retries})...")
+            prompt = chunk_prompt(product_name, specs, chunk)
+            try:
+                resp = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
+                text = resp.text.strip()
+                
+                # Check and clean output
+                final_output = re.sub(r"^\s*```(?:json)?\s*|\s*```\s*$", "", text, flags=re.IGNORECASE | re.DOTALL).strip()
+                
+                # Check if output is valid JSON
+                if safe_load_json(final_output):
+                    partial_texts.append(final_output)
+                    break # Success, move to next chunk
+                else:
+                    raise ValueError("Model did not return valid JSON despite request.")
+                    
+            except Exception as e:
+                if status_container:
+                    status_container.warning(f"Chunk {idx} failed (Attempt {attempt + 1}): {e}")
+                if attempt + 1 == max_retries:
+                    # Append failure marker after all retries fail
+                    partial_texts.append("{}") 
+                    break 
+                time.sleep(2 * (attempt + 1)) # Exponential backoff
 
-    # update progress to merging
-    if status_container:
-        status_container.info("🔀 Merging partial summaries...")
+    # ------------------
+    # Case 3: Final Merge
+    # ------------------
     if prog_bar:
         prog_bar.progress(90)
 
-    # build merge prompt
-    merge_prompt = final_merge_prompt(product_name, specs, partial_texts)
-    try:
-        merge_resp = model.generate_content(merge_prompt, generation_config={"response_mime_type": "application/json"})
-        final_text = merge_resp.text.strip()
-        # strip fences if present
-        if final_text.startswith("```"):
-            final_text = re.sub(r"^```(?:json)?\s*|\s*```$", "", final_text, flags=re.IGNORECASE).strip()
-        return final_text
-    except Exception as e:
-        if status_container:
-            status_container.error(f"Final merge failed: {e}")
+    # Filter out empty failure markers (only keep successful/non-empty results)
+    valid_partials = [p for p in partial_texts if safe_load_json(p) is not None and safe_load_json(p) != {}]
+    
+    if not valid_partials:
+        status_container.error("❌ All summarization chunks failed. Cannot proceed to merge.")
         return None
+        
+    status_container.info(f"🔀 Merging {len(valid_partials)} successful partial summaries...")
+    
+    # build merge prompt
+    merge_prompt = final_merge_prompt(product_name, specs, valid_partials)
+    
+    for attempt in range(max_retries):
+        try:
+            merge_resp = model.generate_content(merge_prompt, generation_config={"response_mime_type": "application/json"})
+            final_text = merge_resp.text.strip()
+            
+            # Check and clean output
+            final_output = re.sub(r"^\s*```(?:json)?\s*|\s*```\s*$", "", final_text, flags=re.IGNORECASE | re.DOTALL).strip()
+            
+            # Final validation check
+            if safe_load_json(final_output):
+                 return final_output
+            else:
+                 raise ValueError("Final merge output was not valid JSON.")
+                 
+        except Exception as e:
+            if status_container:
+                status_container.error(f"⚠️ Final merge failed (Attempt {attempt + 1}/{max_retries}): {e}")
+            if attempt + 1 == max_retries:
+                return None
+            time.sleep(5 * (attempt + 1)) # Longer backoff for the critical merge step
+            
+    return None
 
 # -----------------------------
 # Streamlit UI
@@ -543,20 +601,12 @@ if analyze and phone:
     status.empty()
 
     if not final_json_text:
-        st.error("⚠️ Failed to produce final summary.")
+        st.error("⚠️ Failed to produce final summary. Check the logs/warnings above for API errors.")
         st.stop()
 
     # Parse final JSON
     final_obj = safe_load_json(final_json_text)
-    if not final_obj:
-        # Try to extract JSON using regex (last attempt)
-        m = re.search(r"\{(?:.|\n)*\}", final_json_text)
-        if m:
-            try:
-                final_obj = json.loads(m.group(0))
-            except Exception:
-                final_obj = None
-
+    
     if not final_obj:
         st.error("⚠️ Could not parse AI output as JSON. Showing raw output for debugging.")
         with st.expander("Raw AI output"):
@@ -566,7 +616,10 @@ if analyze and phone:
     # Ensure phone_specs fallback to scraped specs where missing
     phone_specs = final_obj.get("phone_specs", {})
     for k in ["Display", "Processor", "RAM", "Storage", "Camera", "Battery", "OS"]:
-        phone_specs.setdefault(k, specs.get(k, "Not specified"))
+        # Fallback to scraped specs if AI output didn't populate them or used generic text
+        if phone_specs.get(k) in [None, "Not specified", "..."]:
+            phone_specs[k] = specs.get(k, "Not specified")
+        
     final_obj["phone_specs"] = phone_specs
 
     # Display results in readable UI
@@ -601,6 +654,10 @@ if analyze and phone:
                 df_chart = df_aspects.set_index("Aspect")
                 # ensure Positive/Negative present
                 if "Positive" in df_chart.columns and "Negative" in df_chart.columns:
+                    # calculate a net sentiment score for sorting/coloring
+                    df_chart['Net'] = df_chart['Positive'] - df_chart['Negative']
+                    df_chart = df_chart.sort_values(by='Net', ascending=False).drop(columns=['Net'])
+                    
                     st.markdown("### 📊 User Sentiment")
                     st.bar_chart(df_chart[["Positive", "Negative"]], height=320)
 
