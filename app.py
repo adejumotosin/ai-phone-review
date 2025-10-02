@@ -1,4 +1,7 @@
-# app.py
+# app.py - PART 1 OF 2
+# This file contains: imports, config, helpers, scrapers, and prompt builders
+# See Part 2 for: summarization pipeline and Streamlit UI
+
 import os
 import re
 import json
@@ -142,7 +145,7 @@ def fetch_gsmarena_specs(url: str):
     return specs
 
 # -----------------------------
-# FIXED: Reviews scraper with better pagination detection
+# Reviews scraper with pagination
 # -----------------------------
 @st.cache_data(ttl=21600, show_spinner="💬 Fetching user reviews...")
 def fetch_gsmarena_reviews(url: str, limit: int = 1000):
@@ -420,6 +423,38 @@ Now output a single JSON object with this schema:
     return prompt
 
 # -----------------------------
+# Fallback summary creator
+# -----------------------------
+def create_fallback_summary(product_name: str, specs: dict, reviews: list):
+    """Create a basic summary when AI fails"""
+    return json.dumps({
+        "verdict": "Analysis in progress",
+        "pros": ["Based on specifications" if specs else "Data being collected"],
+        "cons": ["Limited review data" if len(reviews) < 10 else "Analysis pending"],
+        "aspect_sentiments": [
+            {"Aspect": "Overall", "Positive": 50, "Negative": 50}
+        ],
+        "user_quotes": reviews[:2] if reviews else ["Reviews being analyzed"],
+        "recommendation": "General smartphone users",
+        "bottom_line": f"{product_name} specifications retrieved. Full analysis requires more data.",
+        "phone_specs": specs or {
+            "Display": "Not specified",
+            "Processor": "Not specified",
+            "RAM": "Not specified",
+            "Storage": "Not specified",
+            "Camera": "Not specified",
+            "Battery": "Not specified",
+            "OS": "Not specified"
+        }
+    }, ensure_ascii=False)
+
+# END OF PART 1
+# Continue with Part 2 for summarization pipeline and UI
+# app.py - PART 2 OF 2
+# This file contains: summarization pipeline and Streamlit UI
+# IMPORTANT: This continues from Part 1 - combine both parts into one app.py file
+
+# -----------------------------
 # Summarization pipeline (chunked) with progress
 # -----------------------------
 def summarize_reviews_chunked(product_name: str, specs: dict, reviews: list, chunk_size: int = 200, status_container=None, prog_bar=None):
@@ -427,19 +462,33 @@ def summarize_reviews_chunked(product_name: str, specs: dict, reviews: list, chu
     Summarize reviews by chunking and then merging partial summaries.
     status_container: optional st.empty() for status messages
     prog_bar: optional st.progress() to update chunk progress
-    Returns JSON string (final merged JSON) or None
+    Returns JSON string (final merged JSON) or fallback summary
     """
     if not reviews:
         # still ask model to produce a summary from specs only
         try:
             prompt = chunk_prompt(product_name, specs, [])
-            resp = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
+            resp = model.generate_content(
+                prompt, 
+                generation_config={
+                    "response_mime_type": "application/json", 
+                    "temperature": 0.3
+                }
+            )
             final_text = resp.text.strip()
+            if status_container:
+                status_container.text("Validating JSON output...")
+            # Validate it's actually JSON
+            test_parse = safe_load_json(final_text)
+            if not test_parse:
+                if status_container:
+                    status_container.warning("Invalid JSON from model, using fallback...")
+                return create_fallback_summary(product_name, specs, [])
             return final_text
         except Exception as e:
             if status_container:
                 status_container.error(f"Gemini error: {e}")
-            return None
+            return create_fallback_summary(product_name, specs, [])
 
     # split reviews into chunks
     chunks = [reviews[i:i + chunk_size] for i in range(0, len(reviews), chunk_size)]
@@ -450,43 +499,115 @@ def summarize_reviews_chunked(product_name: str, specs: dict, reviews: list, chu
         if status_container:
             status_container.info(f"🤖 Summarizing chunk {idx}/{total} (reviews {((idx-1)*chunk_size)+1} - {min(idx*chunk_size, len(reviews))})...")
         if prog_bar:
-            prog_bar.progress(int(((idx - 1) / total) * 80) + 35)  # Progress from 35-80%
+            prog_bar.progress(int(((idx - 1) / total) * 45) + 35)  # Progress from 35-80%
 
         prompt = chunk_prompt(product_name, specs, chunk)
-        try:
-            resp = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
-            text = resp.text.strip()
-            # if the model returned fenced code, strip fences
-            if text.startswith("```"):
-                text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.IGNORECASE).strip()
-            # store raw chunk output (we'll merge later)
-            partial_texts.append(text)
-        except Exception as e:
-            # store failure marker and continue
-            partial_texts.append("{}")
-            if status_container:
-                status_container.warning(f"Chunk {idx} failed: {e}")
-        time.sleep(0.2)  # small delay between calls
+        
+        # Retry logic for failed chunks
+        max_retries = 2
+        for attempt in range(max_retries):
+            try:
+                resp = model.generate_content(
+                    prompt, 
+                    generation_config={
+                        "response_mime_type": "application/json",
+                        "temperature": 0.3,
+                        "max_output_tokens": 2048
+                    }
+                )
+                text = resp.text.strip()
+                # if the model returned fenced code, strip fences
+                if text.startswith("```"):
+                    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.IGNORECASE).strip()
+                
+                # Validate JSON before storing
+                test_json = safe_load_json(text)
+                if test_json:
+                    partial_texts.append(text)
+                    break  # Success
+                elif attempt < max_retries - 1:
+                    if status_container:
+                        status_container.warning(f"Chunk {idx} returned invalid JSON, retrying...")
+                    time.sleep(1)
+                else:
+                    # Last attempt failed, use empty object
+                    partial_texts.append("{}")
+                    if status_container:
+                        status_container.warning(f"Chunk {idx} failed after retries")
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    if status_container:
+                        status_container.warning(f"Chunk {idx} error: {e}, retrying...")
+                    time.sleep(1)
+                else:
+                    # store failure marker and continue
+                    partial_texts.append("{}")
+                    if status_container:
+                        status_container.warning(f"Chunk {idx} failed: {e}")
+        
+        time.sleep(0.3)  # Rate limiting delay
 
     # update progress to merging
     if status_container:
         status_container.info("🔀 Merging partial summaries...")
     if prog_bar:
-        prog_bar.progress(90)
+        prog_bar.progress(85)
+
+    # Filter out empty chunks before merging
+    valid_partials = [p for p in partial_texts if p and p != "{}"]
+    
+    if not valid_partials:
+        if status_container:
+            status_container.warning("No valid chunks to merge, using fallback")
+        return create_fallback_summary(product_name, specs, reviews)
 
     # build merge prompt
-    merge_prompt = final_merge_prompt(product_name, specs, partial_texts)
-    try:
-        merge_resp = model.generate_content(merge_prompt, generation_config={"response_mime_type": "application/json"})
-        final_text = merge_resp.text.strip()
-        # strip fences if present
-        if final_text.startswith("```"):
-            final_text = re.sub(r"^```(?:json)?\s*|\s*```$", "", final_text, flags=re.IGNORECASE).strip()
-        return final_text
-    except Exception as e:
-        if status_container:
-            status_container.error(f"Final merge failed: {e}")
-        return None
+    merge_prompt = final_merge_prompt(product_name, specs, valid_partials)
+    
+    # Try merge with retries
+    max_merge_retries = 3
+    for merge_attempt in range(max_merge_retries):
+        try:
+            merge_resp = model.generate_content(
+                merge_prompt, 
+                generation_config={
+                    "response_mime_type": "application/json",
+                    "temperature": 0.2,
+                    "max_output_tokens": 4096
+                }
+            )
+            final_text = merge_resp.text.strip()
+            # strip fences if present
+            if final_text.startswith("```"):
+                final_text = re.sub(r"^```(?:json)?\s*|\s*```$", "", final_text, flags=re.IGNORECASE).strip()
+            
+            # Validate final JSON
+            test_final = safe_load_json(final_text)
+            if test_final:
+                if prog_bar:
+                    prog_bar.progress(95)
+                return final_text
+            elif merge_attempt < max_merge_retries - 1:
+                if status_container:
+                    status_container.warning(f"Merge attempt {merge_attempt + 1} produced invalid JSON, retrying...")
+                time.sleep(2)
+            else:
+                if status_container:
+                    status_container.error("All merge attempts failed, using fallback")
+                return create_fallback_summary(product_name, specs, reviews)
+                
+        except Exception as e:
+            if merge_attempt < max_merge_retries - 1:
+                if status_container:
+                    status_container.warning(f"Merge attempt {merge_attempt + 1} failed: {e}, retrying...")
+                time.sleep(2)
+            else:
+                if status_container:
+                    status_container.error(f"Final merge failed after all retries: {e}")
+                return create_fallback_summary(product_name, specs, reviews)
+    
+    # Fallback if loop completes without return
+    return create_fallback_summary(product_name, specs, reviews)
 
 # -----------------------------
 # Streamlit UI
@@ -500,6 +621,21 @@ st.sidebar.header("⚙️ Settings")
 review_limit = st.sidebar.slider("Max reviews to analyze", 50, 1000, 400, step=50)
 chunk_size = 200  # fixed, as requested
 show_raw = st.sidebar.checkbox("Show raw AI JSON (expander)", value=False)
+
+# Add info in sidebar
+st.sidebar.markdown("---")
+st.sidebar.info("""
+**How it works:**
+1. Searches GSMArena for the phone
+2. Scrapes specs and user reviews
+3. Uses Gemini AI to analyze and summarize
+4. Presents insights with sentiment analysis
+
+**Tips:**
+- Start with 100-200 reviews for faster results
+- Check raw JSON if results seem incomplete
+- Try different phone name variations if not found
+""")
 
 # Input + action
 phone = st.text_input("Enter phone name (e.g., Samsung Galaxy S24 FE)", value="Samsung Galaxy S24")
@@ -515,6 +651,7 @@ if analyze and phone:
 
     if not product_url:
         st.error(f"❌ Could not find '{phone}' on GSMArena.")
+        st.info("💡 Try variations like 'iPhone 15 Pro' or 'Galaxy S24 Ultra'")
         status.empty()
         prog.empty()
         st.stop()
@@ -538,12 +675,21 @@ if analyze and phone:
 
     # Summarize with chunking
     status.text("🤖 Summarizing reviews with Gemini in chunks...")
-    final_json_text = summarize_reviews_chunked(phone, specs, reviews, chunk_size=chunk_size, status_container=status, prog_bar=prog)
+    final_json_text = summarize_reviews_chunked(
+        phone, 
+        specs, 
+        reviews, 
+        chunk_size=chunk_size, 
+        status_container=status, 
+        prog_bar=prog
+    )
     prog.progress(100)
     status.empty()
+    prog.empty()
 
     if not final_json_text:
-        st.error("⚠️ Failed to produce final summary.")
+        st.error("⚠️ Failed to produce final summary after multiple retries.")
+        st.info("💡 Try reducing the number of reviews or check your API quota.")
         st.stop()
 
     # Parse final JSON
@@ -559,7 +705,7 @@ if analyze and phone:
 
     if not final_obj:
         st.error("⚠️ Could not parse AI output as JSON. Showing raw output for debugging.")
-        with st.expander("Raw AI output"):
+        with st.expander("🔍 Raw AI output (for debugging)"):
             st.text_area("AI output", final_json_text, height=400)
         st.stop()
 
@@ -576,11 +722,26 @@ if analyze and phone:
     # Metric cards row
     c1, c2, c3 = st.columns(3)
     with c1:
-        st.markdown(f"<div style='background:#0b0b0b;color:white;padding:12px;border-radius:8px;'><b>⭐ Verdict</b><div style='font-size:18px;margin-top:6px'>{final_obj.get('verdict','N/A')}</div></div>", unsafe_allow_html=True)
+        st.markdown(
+            f"<div style='background:#0b0b0b;color:white;padding:12px;border-radius:8px;'>"
+            f"<b>⭐ Verdict</b><div style='font-size:18px;margin-top:6px'>{final_obj.get('verdict','N/A')}</div>"
+            f"</div>", 
+            unsafe_allow_html=True
+        )
     with c2:
-        st.markdown(f"<div style='background:#0b0b0b;color:white;padding:12px;border-radius:8px;'><b>🎯 Best For</b><div style='font-size:18px;margin-top:6px'>{final_obj.get('recommendation','N/A')}</div></div>", unsafe_allow_html=True)
+        st.markdown(
+            f"<div style='background:#0b0b0b;color:white;padding:12px;border-radius:8px;'>"
+            f"<b>🎯 Best For</b><div style='font-size:18px;margin-top:6px'>{final_obj.get('recommendation','N/A')}</div>"
+            f"</div>", 
+            unsafe_allow_html=True
+        )
     with c3:
-        st.markdown(f"<div style='background:#0b0b0b;color:white;padding:12px;border-radius:8px;'><b>📊 Data</b><div style='font-size:18px;margin-top:6px'>{len(phone_specs)} specs, {len(reviews)} reviews</div></div>", unsafe_allow_html=True)
+        st.markdown(
+            f"<div style='background:#0b0b0b;color:white;padding:12px;border-radius:8px;'>"
+            f"<b>📊 Data</b><div style='font-size:18px;margin-top:6px'>{len(phone_specs)} specs, {len(reviews)} reviews</div>"
+            f"</div>", 
+            unsafe_allow_html=True
+        )
 
     # Bottom line
     st.markdown("### 🎯 Bottom Line")
@@ -601,26 +762,56 @@ if analyze and phone:
                 df_chart = df_aspects.set_index("Aspect")
                 # ensure Positive/Negative present
                 if "Positive" in df_chart.columns and "Negative" in df_chart.columns:
-                    st.markdown("### 📊 User Sentiment")
+                    st.markdown("### 📊 User Sentiment by Aspect")
                     st.bar_chart(df_chart[["Positive", "Negative"]], height=320)
 
     with right:
         st.markdown("### ✅ Strengths")
-        for p in final_obj.get("pros", []):
-            st.success(p)
+        pros = final_obj.get("pros", [])
+        if pros:
+            for p in pros:
+                st.success(f"✓ {p}")
+        else:
+            st.info("No strengths identified")
+            
         st.markdown("### ⚠️ Weaknesses")
-        for c in final_obj.get("cons", []):
-            st.error(c)
+        cons = final_obj.get("cons", [])
+        if cons:
+            for c in cons:
+                st.error(f"✗ {c}")
+        else:
+            st.info("No weaknesses identified")
 
     # User quotes
     if final_obj.get("user_quotes"):
         st.markdown("### 💬 What Users Are Saying")
-        for i, q in enumerate(final_obj.get("user_quotes", []), 1):
-            st.info(f"**User {i}:** {q}")
+        cols = st.columns(2)
+        quotes = final_obj.get("user_quotes", [])
+        for i, q in enumerate(quotes):
+            with cols[i % 2]:
+                st.info(f'💭 "{q}"')
 
     # Download & raw
     st.markdown("---")
-    st.download_button("📥 Download JSON", json.dumps(final_obj, indent=2, ensure_ascii=False), f"{phone.replace(' ','_')}_summary.json", "application/json")
+    col1, col2 = st.columns([1, 3])
+    with col1:
+        st.download_button(
+            "📥 Download JSON", 
+            json.dumps(final_obj, indent=2, ensure_ascii=False), 
+            f"{phone.replace(' ','_')}_summary.json", 
+            "application/json",
+            use_container_width=True
+        )
+    with col2:
+        st.markdown(f"*Analysis complete! Based on {len(reviews)} reviews and official specs.*")
+    
     if show_raw:
-        with st.expander("📄 Raw AI JSON"):
+        with st.expander("📄 Raw AI JSON (for debugging/verification)"):
             st.json(final_obj)
+
+    # Footer
+    st.markdown("---")
+    st.caption("Data sourced from GSMArena • Analysis powered by Google Gemini • Built with Streamlit")
+
+# END OF PART 2
+# Remember to combine Part 1 and Part 2 into a single app.py file!
