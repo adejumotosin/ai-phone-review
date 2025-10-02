@@ -450,6 +450,9 @@ def create_fallback_summary(product_name: str, specs: dict, reviews: list):
 
 # END OF PART 1
 # Continue with Part 2 for summarization pipeline and UI
+
+
+
 # app.py - PART 2 OF 2
 # This file contains: summarization pipeline and Streamlit UI
 # IMPORTANT: This continues from Part 1 - combine both parts into one app.py file
