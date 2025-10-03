@@ -48,14 +48,10 @@ def safe_load_json(text: str):
         return None
 
 # -----------------------------
-# Resolve GSMArena product + review URL - FIX APPLIED HERE
+# Resolve GSMArena product + review URL
 # -----------------------------
-# Changed caching key to ensure robustness against environment
-def get_cache_key_resolve_gsmarena(product_name: str):
-    """Generates a cache key based on the sanitized product name."""
-    return product_name.strip().lower().replace(" ", "-")
-
-@st.cache_data(ttl=86400, show_spinner="🔎 Searching GSMArena...", show_hash=False)
+# Removed show_hash=False
+@st.cache_data(ttl=86400, show_spinner="🔎 Searching GSMArena...")
 def resolve_gsmarena_url(product_name: str):
     """Search GSMArena and return (product_url, review_url)."""
     try:
@@ -110,6 +106,7 @@ def build_review_url(product_url: str) -> str:
 # -----------------------------
 # Specs scraper
 # -----------------------------
+# Removed show_hash=False
 @st.cache_data(ttl=86400, show_spinner="📊 Fetching specs...")
 def fetch_gsmarena_specs(url: str):
     """Scrape key specs from GSMArena product page."""
@@ -169,6 +166,7 @@ def fetch_gsmarena_specs(url: str):
 # -----------------------------
 # Reviews scraper with better pagination detection
 # -----------------------------
+# Removed show_hash=False
 @st.cache_data(ttl=21600, show_spinner="💬 Fetching user reviews...")
 def fetch_gsmarena_reviews(url: str, limit: int = 1000):
     """
@@ -357,7 +355,7 @@ def fetch_gsmarena_reviews(url: str, limit: int = 1000):
     return reviews[:limit]
 
 # -----------------------------
-# Prompt builders (No changes here, already robust)
+# Prompt builders
 # -----------------------------
 def chunk_prompt(product_name: str, specs: dict, reviews_subset: list):
     """Build a strict chunk prompt for summarizing a subset of reviews."""
@@ -557,7 +555,7 @@ def summarize_reviews_chunked(product_name: str, specs: dict, reviews: list, chu
                  
         except Exception as e:
             if status_container:
-                status_container.error(f"⚠️ Final merge failed (Attempt {attempt + 1}/{max_retries}): {e}")
+                st.error(f"⚠️ Final merge failed (Attempt {attempt + 1}/{max_retries}): {e}")
             if attempt + 1 == max_retries:
                 return None
             time.sleep(5 * (attempt + 1)) # Longer backoff for the critical merge step
