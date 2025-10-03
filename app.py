@@ -9,20 +9,18 @@ import requests
 import pandas as pd
 import streamlit as st
 from bs4 import BeautifulSoup
-import google.generativeai as genai
+from groq import Groq
 from urllib.parse import urljoin, urlparse, parse_qs, urlencode
 
 # -----------------------------
-# Configure Gemini (Google) SDK
+# Configure Groq API
 # -----------------------------
-api_key = st.secrets.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
+api_key = st.secrets.get("GROQ_API_KEY") or os.environ.get("GROQ_API_KEY")
 if not api_key:
-    st.error("❌ Missing Gemini API key. Please set GEMINI_API_KEY in secrets or env vars.")
+    st.error("❌ Missing Groq API key. Please set GROQ_API_KEY in secrets or env vars.")
     st.stop()
 
-genai.configure(api_key=api_key)
-# create a model handle
-model = genai.GenerativeModel("gemini-1.5-flash")
+client = Groq(api_key=api_key)
 
 # -----------------------------
 # Helpers: safe json loader
@@ -142,7 +140,7 @@ def fetch_gsmarena_specs(url: str):
     return specs
 
 # -----------------------------
-# FIXED: Reviews scraper with better pagination detection
+# Reviews scraper
 # -----------------------------
 @st.cache_data(ttl=21600, show_spinner="💬 Fetching user reviews...")
 def fetch_gsmarena_reviews(url: str, limit: int = 1000):
@@ -179,24 +177,22 @@ def fetch_gsmarena_reviews(url: str, limit: int = 1000):
             
             st.info(f"📖 Scraping page {page_count}: {len(reviews)} reviews so far...")
             
-            time.sleep(2)  # More polite delay
+            time.sleep(2)
             r = requests.get(page_url, headers=headers, timeout=15)
             r.raise_for_status()
             soup = BeautifulSoup(r.text, "html.parser")
 
-            # More comprehensive selectors for review content
             review_blocks = []
             
-            # Try different review selectors in order of preference
             selectors_to_try = [
-                ".opin",  # Most common
+                ".opin",
                 ".user-opinion", 
                 ".uopin",
                 ".user-review",
                 ".review-item",
                 ".review-content",
                 ".opinion",
-                "div[id*='opin']",  # IDs containing 'opin'
+                "div[id*='opin']",
                 "div.thread-item",
                 ".thread .post",
                 ".user-thread .post"
@@ -206,41 +202,34 @@ def fetch_gsmarena_reviews(url: str, limit: int = 1000):
                 blocks = soup.select(selector)
                 if blocks:
                     review_blocks.extend(blocks)
-                    break  # Use first successful selector
+                    break
             
-            # If no review blocks found, try fallback approach
             if not review_blocks:
-                # Look for divs with specific patterns
                 all_divs = soup.find_all('div')
                 for div in all_divs:
-                    # Check if div contains review-like content
                     text = div.get_text(strip=True)
                     if (50 < len(text) < 2000 and 
                         any(word in text.lower() for word in ['phone', 'battery', 'camera', 'display', 'good', 'bad', 'excellent', 'terrible']) and
                         not any(skip in text.lower() for skip in ['gsmarena', 'admin', 'moderator', 'advertisement'])):
                         review_blocks.append(div)
 
-            # Extract text from found blocks
             new_reviews_count = 0
             for block in review_blocks:
                 text = block.get_text(" ", strip=True)
                 
-                # Better filtering criteria
-                if (30 < len(text) < 1500 and  # Reasonable length
+                if (30 < len(text) < 1500 and
                     not any(skip in text.lower() for skip in [
                         'gsmarena', 'admin', 'moderator', 'delete', 'report', 
                         'advertisement', 'sponsored', 'click here', 'visit our',
                         'terms of service', 'privacy policy'
                     ]) and
-                    # Must contain phone-related keywords
                     any(keyword in text.lower() for keyword in [
                         'phone', 'battery', 'camera', 'display', 'screen', 
                         'performance', 'android', 'ios', 'good', 'bad', 'love', 'hate',
                         'recommend', 'buy', 'excellent', 'terrible', 'amazing', 'awful'
                     ])):
                     
-                    # Avoid duplicates
-                    if text not in [r[:100] for r in reviews]:  # Check first 100 chars for similarity
+                    if text not in [r[:100] for r in reviews]:
                         reviews.append(text)
                         new_reviews_count += 1
                         if len(reviews) >= limit:
@@ -252,10 +241,8 @@ def fetch_gsmarena_reviews(url: str, limit: int = 1000):
                 st.warning(f"⚠️ No new reviews found on page {page_count}, stopping pagination")
                 break
 
-            # IMPROVED pagination detection
             next_link = None
             
-            # Method 1: Look for specific next page links
             next_candidates = [
                 soup.find("a", string=re.compile(r"next", re.I)),
                 soup.find("a", {"title": re.compile(r"next", re.I)}),
@@ -269,7 +256,6 @@ def fetch_gsmarena_reviews(url: str, limit: int = 1000):
                     next_link = candidate
                     break
             
-            # Method 2: Look for numbered pagination
             if not next_link:
                 current_page = page_count
                 page_links = soup.find_all("a", href=re.compile(r"page=\d+"))
@@ -280,10 +266,8 @@ def fetch_gsmarena_reviews(url: str, limit: int = 1000):
                         next_link = link
                         break
             
-            # Method 3: Try to construct next page URL manually
             if not next_link and "page=" in page_url:
                 try:
-                    # Parse current page number and increment
                     parsed = urlparse(page_url)
                     query_params = parse_qs(parsed.query)
                     
@@ -291,26 +275,22 @@ def fetch_gsmarena_reviews(url: str, limit: int = 1000):
                     if 'page' in query_params:
                         current_page_num = int(query_params['page'][0])
                     
-                    # Construct next page URL
                     query_params['page'] = [str(current_page_num + 1)]
                     new_query = urlencode(query_params, doseq=True)
                     next_page_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}?{new_query}"
                     
-                    # Verify this page exists by checking if it's different from current
                     if next_page_url != page_url:
                         page_url = next_page_url
                         continue
                 except Exception as e:
                     st.warning(f"Failed to construct next page URL: {e}")
             
-            # Method 4: Add page parameter if none exists
             elif not next_link and "page=" not in page_url:
                 separator = "&" if "?" in page_url else "?"
                 next_page_url = f"{page_url}{separator}page=2"
                 page_url = next_page_url
                 continue
             
-            # If we found a next link, process it
             if next_link:
                 href = next_link["href"]
                 if href.startswith("http"):
@@ -385,7 +365,6 @@ Return a JSON object matching this example schema:
 def final_merge_prompt(product_name: str, specs: dict, partial_texts: list):
     """
     Ask the model to merge multiple partial JSON summaries into one final valid JSON.
-    This prompt is strict to avoid character-splitting.
     """
     joined = "\n\n---- PARTIAL SUMMARY ----\n\n".join(partial_texts)
     prompt = f"""
@@ -420,72 +399,98 @@ Now output a single JSON object with this schema:
     return prompt
 
 # -----------------------------
-# Summarization pipeline (chunked) with progress
+# Summarization with Groq
 # -----------------------------
 def summarize_reviews_chunked(product_name: str, specs: dict, reviews: list, chunk_size: int = 200, status_container=None, prog_bar=None):
     """
-    Summarize reviews by chunking and then merging partial summaries.
-    status_container: optional st.empty() for status messages
-    prog_bar: optional st.progress() to update chunk progress
-    Returns JSON string (final merged JSON) or None
+    Summarize reviews by chunking and then merging partial summaries using Groq.
     """
     if not reviews:
-        # still ask model to produce a summary from specs only
         try:
             prompt = chunk_prompt(product_name, specs, [])
-            resp = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
-            final_text = resp.text.strip()
+            response = client.chat.completions.create(
+                model="llama-3.1-70b-versatile",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.7,
+                max_tokens=2048
+            )
+            final_text = response.choices[0].message.content.strip()
             return final_text
         except Exception as e:
             if status_container:
-                status_container.error(f"Gemini error: {e}")
+                status_container.error(f"Groq error (no reviews): {e}")
+            st.error(f"Full error: {str(e)}")
+            import traceback
+            st.error(traceback.format_exc())
             return None
 
-    # split reviews into chunks
     chunks = [reviews[i:i + chunk_size] for i in range(0, len(reviews), chunk_size)]
     partial_texts = []
 
     total = len(chunks)
+    failed_chunks = 0
+    
     for idx, chunk in enumerate(chunks, start=1):
         if status_container:
             status_container.info(f"🤖 Summarizing chunk {idx}/{total} (reviews {((idx-1)*chunk_size)+1} - {min(idx*chunk_size, len(reviews))})...")
         if prog_bar:
-            prog_bar.progress(int(((idx - 1) / total) * 80) + 35)  # Progress from 35-80%
+            prog_bar.progress(int(((idx - 1) / total) * 45) + 35)
 
         prompt = chunk_prompt(product_name, specs, chunk)
         try:
-            resp = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
-            text = resp.text.strip()
-            # if the model returned fenced code, strip fences
+            response = client.chat.completions.create(
+                model="llama-3.1-70b-versatile",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.7,
+                max_tokens=2048
+            )
+            text = response.choices[0].message.content.strip()
             if text.startswith("```"):
                 text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.IGNORECASE).strip()
-            # store raw chunk output (we'll merge later)
             partial_texts.append(text)
+            if status_container:
+                status_container.success(f"✅ Chunk {idx} completed")
         except Exception as e:
-            # store failure marker and continue
+            failed_chunks += 1
             partial_texts.append("{}")
             if status_container:
-                status_container.warning(f"Chunk {idx} failed: {e}")
-        time.sleep(0.2)  # small delay between calls
+                status_container.warning(f"⚠️ Chunk {idx} failed: {e}")
+            st.warning(f"Chunk {idx} error details: {str(e)}")
+        time.sleep(0.5)
 
-    # update progress to merging
+    if status_container:
+        status_container.info(f"📊 Processed {total} chunks ({failed_chunks} failed)")
+
+    if failed_chunks > total * 0.5:
+        if status_container:
+            status_container.error(f"❌ Too many chunks failed ({failed_chunks}/{total}). Cannot proceed.")
+        return None
+
     if status_container:
         status_container.info("🔀 Merging partial summaries...")
     if prog_bar:
         prog_bar.progress(90)
 
-    # build merge prompt
     merge_prompt = final_merge_prompt(product_name, specs, partial_texts)
     try:
-        merge_resp = model.generate_content(merge_prompt, generation_config={"response_mime_type": "application/json"})
-        final_text = merge_resp.text.strip()
-        # strip fences if present
+        response = client.chat.completions.create(
+            model="llama-3.1-70b-versatile",
+            messages=[{"role": "user", "content": merge_prompt}],
+            temperature=0.5,
+            max_tokens=2048
+        )
+        final_text = response.choices[0].message.content.strip()
         if final_text.startswith("```"):
             final_text = re.sub(r"^```(?:json)?\s*|\s*```$", "", final_text, flags=re.IGNORECASE).strip()
+        if status_container:
+            status_container.success("✅ Final merge completed")
         return final_text
     except Exception as e:
         if status_container:
-            status_container.error(f"Final merge failed: {e}")
+            status_container.error(f"❌ Final merge failed: {e}")
+        st.error(f"Merge error details: {str(e)}")
+        import traceback
+        st.error(traceback.format_exc())
         return None
 
 # -----------------------------
@@ -493,15 +498,13 @@ def summarize_reviews_chunked(product_name: str, specs: dict, reviews: list, chu
 # -----------------------------
 st.set_page_config(page_title="AI Phone Review Engine", page_icon="📱", layout="wide")
 st.title("📱 AI-Powered Phone Review Engine")
-st.markdown("Combine GSMArena specs with **real user reviews** and summarize with Gemini.")
+st.markdown("Combine GSMArena specs with **real user reviews** and summarize with Groq AI.")
 
-# Sidebar controls
 st.sidebar.header("⚙️ Settings")
 review_limit = st.sidebar.slider("Max reviews to analyze", 50, 1000, 400, step=50)
-chunk_size = 200  # fixed, as requested
+chunk_size = 200
 show_raw = st.sidebar.checkbox("Show raw AI JSON (expander)", value=False)
 
-# Input + action
 phone = st.text_input("Enter phone name (e.g., Samsung Galaxy S24 FE)", value="Samsung Galaxy S24")
 analyze = st.button("🔍 Analyze Phone", type="primary")
 
@@ -525,19 +528,16 @@ if analyze and phone:
     else:
         st.warning("⚠️ Couldn't build reviews URL automatically. Proceeding with specs only.")
 
-    # Fetch specs
     status.text("📊 Fetching specs...")
     specs = fetch_gsmarena_specs(product_url)
     prog.progress(15)
 
-    # Fetch reviews
-    status.text("💬 Collecting user reviews (this can take a while for many pages)...")
+    status.text("💬 Collecting user reviews...")
     reviews = fetch_gsmarena_reviews(review_url, limit=review_limit) if review_url else []
     prog.progress(35)
     st.info(f"✅ Collected {len(reviews)} reviews (cap: {review_limit})")
 
-    # Summarize with chunking
-    status.text("🤖 Summarizing reviews with Gemini in chunks...")
+    status.text("🤖 Summarizing reviews with Groq AI...")
     final_json_text = summarize_reviews_chunked(phone, specs, reviews, chunk_size=chunk_size, status_container=status, prog_bar=prog)
     prog.progress(100)
     status.empty()
@@ -546,10 +546,8 @@ if analyze and phone:
         st.error("⚠️ Failed to produce final summary.")
         st.stop()
 
-    # Parse final JSON
     final_obj = safe_load_json(final_json_text)
     if not final_obj:
-        # Try to extract JSON using regex (last attempt)
         m = re.search(r"\{(?:.|\n)*\}", final_json_text)
         if m:
             try:
@@ -563,17 +561,14 @@ if analyze and phone:
             st.text_area("AI output", final_json_text, height=400)
         st.stop()
 
-    # Ensure phone_specs fallback to scraped specs where missing
     phone_specs = final_obj.get("phone_specs", {})
     for k in ["Display", "Processor", "RAM", "Storage", "Camera", "Battery", "OS"]:
         phone_specs.setdefault(k, specs.get(k, "Not specified"))
     final_obj["phone_specs"] = phone_specs
 
-    # Display results in readable UI
     st.markdown("---")
     st.subheader(f"📝 Analysis — {phone}")
 
-    # Metric cards row
     c1, c2, c3 = st.columns(3)
     with c1:
         st.markdown(f"<div style='background:#0b0b0b;color:white;padding:12px;border-radius:8px;'><b>⭐ Verdict</b><div style='font-size:18px;margin-top:6px'>{final_obj.get('verdict','N/A')}</div></div>", unsafe_allow_html=True)
@@ -582,24 +577,19 @@ if analyze and phone:
     with c3:
         st.markdown(f"<div style='background:#0b0b0b;color:white;padding:12px;border-radius:8px;'><b>📊 Data</b><div style='font-size:18px;margin-top:6px'>{len(phone_specs)} specs, {len(reviews)} reviews</div></div>", unsafe_allow_html=True)
 
-    # Bottom line
     st.markdown("### 🎯 Bottom Line")
     st.info(final_obj.get("bottom_line", "No summary available."))
 
-    # Two column main
     left, right = st.columns([0.6, 0.4])
     with left:
-        # Specs table
         st.markdown("### 🔧 Technical Specifications")
         df_specs = pd.DataFrame(list(phone_specs.items()), columns=["Component", "Details"])
         st.table(df_specs)
 
-        # Aspect sentiments chart (if present)
         if final_obj.get("aspect_sentiments"):
             df_aspects = pd.DataFrame(final_obj["aspect_sentiments"])
             if not df_aspects.empty and "Aspect" in df_aspects.columns:
                 df_chart = df_aspects.set_index("Aspect")
-                # ensure Positive/Negative present
                 if "Positive" in df_chart.columns and "Negative" in df_chart.columns:
                     st.markdown("### 📊 User Sentiment")
                     st.bar_chart(df_chart[["Positive", "Negative"]], height=320)
@@ -612,13 +602,11 @@ if analyze and phone:
         for c in final_obj.get("cons", []):
             st.error(c)
 
-    # User quotes
     if final_obj.get("user_quotes"):
         st.markdown("### 💬 What Users Are Saying")
         for i, q in enumerate(final_obj.get("user_quotes", []), 1):
             st.info(f"**User {i}:** {q}")
 
-    # Download & raw
     st.markdown("---")
     st.download_button("📥 Download JSON", json.dumps(final_obj, indent=2, ensure_ascii=False), f"{phone.replace(' ','_')}_summary.json", "application/json")
     if show_raw:
