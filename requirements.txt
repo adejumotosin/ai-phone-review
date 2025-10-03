@@ -2,5 +2,7 @@ streamlit
 pandas
 requests
 beautifulsoup4
-google-genai
+google-genai==0.17.0
 google-api-core
+google-auth
+protobuf
