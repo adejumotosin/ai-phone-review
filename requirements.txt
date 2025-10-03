@@ -1,9 +1,6 @@
 streamlit
 pandas
-requests
 beautifulsoup4
-lxml
+requests
 scikit-learn
-joblib
-summa
-nltk
+supabase-py
