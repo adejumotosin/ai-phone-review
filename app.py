@@ -409,7 +409,7 @@ def summarize_reviews_chunked(product_name: str, specs: dict, reviews: list, chu
         try:
             prompt = chunk_prompt(product_name, specs, [])
             response = client.chat.completions.create(
-                model="llama-3.1-70b-versatile",
+                model="llama-3.3-70b-versatile",
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.7,
                 max_tokens=2048
@@ -439,7 +439,7 @@ def summarize_reviews_chunked(product_name: str, specs: dict, reviews: list, chu
         prompt = chunk_prompt(product_name, specs, chunk)
         try:
             response = client.chat.completions.create(
-                model="llama-3.1-70b-versatile",
+                model="llama-3.3-70b-versatile",
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.7,
                 max_tokens=2048
@@ -474,7 +474,7 @@ def summarize_reviews_chunked(product_name: str, specs: dict, reviews: list, chu
     merge_prompt = final_merge_prompt(product_name, specs, partial_texts)
     try:
         response = client.chat.completions.create(
-            model="llama-3.1-70b-versatile",
+            model="llama-3.3-70b-versatile",
             messages=[{"role": "user", "content": merge_prompt}],
             temperature=0.5,
             max_tokens=2048
