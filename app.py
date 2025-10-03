@@ -36,9 +36,11 @@ def resolve_gsmarena_url(product_name: str):
         r = requests.get(search_url, headers=headers, timeout=15)
         r.raise_for_status()
         soup = BeautifulSoup(r.text, "html.parser")
+
         link = soup.select_one(".makers a") or soup.select_one(".makers li a") or soup.select_one("a[href*='.php']")
         if not link or not link.has_attr("href"):
             return None, None
+
         product_href = link["href"]
         product_url = "https://www.gsmarena.com/" + product_href
         review_url = build_review_url(product_url)
@@ -78,6 +80,7 @@ def fetch_gsmarena_specs(url: str):
         r = requests.get(url, headers=headers, timeout=15)
         r.raise_for_status()
         soup = BeautifulSoup(r.text, "html.parser")
+
         rows = soup.select(".article-info table tr") or soup.select("#specs-list table tr") or soup.select("table.specs tr")
         for row in rows:
             th = row.find("td", class_="ttl") or row.find("th") or row.find("td", class_="spec-title")
@@ -104,8 +107,10 @@ def fetch_gsmarena_specs(url: str):
                     break
     except Exception:
         pass
+
     for k in ["Display", "Processor", "RAM", "Storage", "Camera", "Battery", "OS"]:
         specs.setdefault(k, "Not specified")
+
     return specs
 
 # -----------------------------
@@ -131,6 +136,7 @@ def fetch_gsmarena_reviews(url: str, limit: int = 1000):
             r = requests.get(page_url, headers=headers, timeout=15)
             r.raise_for_status()
             soup = BeautifulSoup(r.text, "html.parser")
+
             review_blocks = soup.select(".opin, .user-opinion, .uopin") or soup.select(".review-item, .review-content")
             for block in review_blocks:
                 text = block.get_text(" ", strip=True)
@@ -138,6 +144,7 @@ def fetch_gsmarena_reviews(url: str, limit: int = 1000):
                     reviews.append(text)
                     if len(reviews) >= limit:
                         break
+
             next_link = soup.find("a", string=re.compile(r"next", re.I))
             if next_link and next_link.has_attr("href"):
                 href = next_link["href"]
@@ -211,28 +218,25 @@ if analyze and phone:
 
     status.text("📊 Fetching specs...")
     specs = fetch_gsmarena_specs(product_url)
-    st.info(f"✅ Specs fetched.")
+    st.subheader("📄 Phone Specs")
+    st.json(specs)
 
     status.text("💬 Collecting reviews...")
     reviews = fetch_gsmarena_reviews(review_url, limit=review_limit) if review_url else []
-    st.info(f"✅ Collected {len(reviews)} reviews.")
+    st.subheader("💬 Sample Reviews")
+    st.write(reviews[:10] if reviews else "No reviews available.")
 
     status.text("🔍 Extracting aspect-specific pros/cons...")
-    aspect_pros_cons = extract_aspect_pros_cons(reviews)
-    st.info(f"✅ Extracted pros/cons for {len(aspect_pros_cons)} aspects.")
+    aspect_summary = extract_aspect_pros_cons(reviews)
+    st.subheader("🔑 Aspect Pros & Cons")
+    for aspect, data in aspect_summary.items():
+        st.markdown(f"**{aspect}**")
+        st.markdown(f"Pros: {data['pros']}")
+        st.markdown(f"Cons: {data['cons']}")
 
-    # Display results
-    st.subheader("📊 Phone Specs")
-    for k, v in specs.items():
-        st.write(f"**{k}:** {v}")
-
+    # General sentiment summary
     if reviews:
-        st.subheader("💡 Aspect-specific Pros/Cons")
-        for aspect, vals in aspect_pros_cons.items():
-            st.write(f"### {aspect}")
-            st.write("**Pros:**")
-            for p in vals["pros"]:
-                st.write(f"- {p}")
-            st.write("**Cons:**")
-            for c in vals["cons"]:
-                st.write(f"- {c}")
+        positive_count = sum(1 for r in reviews if analyze_review_sentiment(r)[0] == "POSITIVE")
+        negative_count = sum(1 for r in reviews if analyze_review_sentiment(r)[0] == "NEGATIVE")
+        st.subheader("📊 General Sentiment Summary")
+        st.bar_chart({"Positive": positive_count, "Negative": negative_count})
