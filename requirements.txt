@@ -3,4 +3,6 @@ pandas
 beautifulsoup4
 requests
 scikit-learn
-supabase-py
+supabase
+joblib
+summa
