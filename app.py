@@ -1,330 +1,350 @@
 # app.py
 import os
 import re
-import json
 import time
-import math
-import hashlib
-import requests
-import pandas as pd
+import json
+import sqlite3
+from pathlib import Path
+from typing import List, Dict, Tuple
+
 import streamlit as st
+import pandas as pd
+import requests
 from bs4 import BeautifulSoup
-import google.generativeai as genai
-# Note: Renaming for consistency with your original approach, 
-# but I recommend using 'urllib.parse.quote' instead of 'requests.utils.quote'
-from urllib.parse import urljoin, urlparse, parse_qs, urlencode, quote 
+
+# ML imports
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.linear_model import LogisticRegression
+from sklearn.pipeline import Pipeline
+import joblib
+
+# Text summarization (optional; fallback available)
+try:
+    from summa import summarizer
+    SUMMA_AVAILABLE = True
+except Exception:
+    SUMMA_AVAILABLE = False
 
 # -----------------------------
-# Configure Gemini (Google) SDK
+# CONFIG
 # -----------------------------
-api_key = st.secrets.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
-if not api_key:
-    st.error("❌ Missing Gemini API key. Please set GEMINI_API_KEY in secrets or env vars.")
-    st.stop()
+DB_PATH = Path("reviews.db")
+MODEL_DIR = Path("models")
+MODEL_DIR.mkdir(exist_ok=True)
+MODEL_PATH = MODEL_DIR / "sentiment_model.joblib"
+VECT_PATH = MODEL_DIR / "vectorizer.joblib"  # optional, but pipeline saved in joblib anyway
 
-genai.configure(api_key=api_key)
-# create a model handle
-model = genai.GenerativeModel("gemini-1.5-flash")
-
-# -----------------------------
-# Helpers: safe json loader
-# -----------------------------
-def safe_load_json(text: str):
-    """Try to load JSON; if fails, extract first {...} block and try again."""
-    if not text: # Added check for None/empty string
-        return None
-    try:
-        # Added stripping of markdown fences for better parsing
-        text = re.sub(r"^\s*```(?:json)?\s*|\s*```\s*$", "", text, flags=re.IGNORECASE | re.DOTALL).strip()
-        return json.loads(text)
-    except json.JSONDecodeError:
-        m = re.search(r"\{(?:.|\n)*\}", text)
-        if m:
-            try:
-                return json.loads(m.group(0))
-            except Exception:
-                return None
-        return None
+ASPECT_KEYWORDS = {
+    "Battery": ["battery", "charge", "charging", "power", "life", "mah"],
+    "Camera": ["camera", "photo", "picture", "video", "selfie", "lens"],
+    "Display": ["display", "screen", "resolution", "brightness", "oled", "lcd"],
+    "Performance": ["performance", "speed", "lag", "slow", "fps", "processor", "chip", "cpu"]
+}
 
 # -----------------------------
-# Resolve GSMArena product + review URL
+# DB HELPERS (SQLite)
 # -----------------------------
-@st.cache_data(ttl=86400, show_spinner="🔎 Searching GSMArena...")
-def resolve_gsmarena_url(product_name: str):
-    """Search GSMArena and return (product_url, review_url)."""
-    try:
-        # RESTORED TO ORIGINAL WORKING LOGIC
-        query = str(product_name).strip() # Ensure it's a string and stripped
-        if not query:
-             return None, None
-             
-        # Using urllib.parse.quote as a standard
-        search_url = f"https://www.gsmarena.com/results.php3?sQuickSearch=yes&sName={quote(query)}"
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-        
-        # This will now use the correct URL with requests.get()
-        r = requests.get(search_url, headers=headers, timeout=15)
-        r.raise_for_status()
-        soup = BeautifulSoup(r.text, "html.parser")
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS reviews (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            phone_model TEXT,
+            review_text TEXT,
+            review_date TEXT,
+            rating INTEGER,
+            scraped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
 
-        # common selector for results
-        link = soup.select_one(".makers a") or soup.select_one(".makers li a")
-        if not link:
-            # last resort: any php link
-            link = soup.select_one("a[href*='.php']")
-        if not link or not link.has_attr("href"):
-            return None, None
+def save_reviews_to_db(phone_model: str, reviews: List[str]):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    for r in reviews:
+        cur.execute(
+            "INSERT INTO reviews (phone_model, review_text) VALUES (?, ?)",
+            (phone_model, r[:2000])  # limit length for safety
+        )
+    conn.commit()
+    conn.close()
 
-        product_href = link["href"]
-        product_url = "https://www.gsmarena.com/" + product_href
-        # Build review URL reliably
-        review_url = build_review_url(product_url)
-        return product_url, review_url
-    except Exception as e:
-        # Use st.error here since it's a critical failure, and the traceback is already shown
-        st.error(f"⚠️ GSMArena search failed: {type(e).__name__} - {e}") 
-        return None, None
-
-def build_review_url(product_url: str) -> str:
-    """Convert product URL to reviews URL: <base>-reviews-<id>.php"""
-    if not product_url or not product_url.endswith(".php"):
-        return None
-    try:
-        base, phone_id_part = product_url.rsplit("-", 1)
-        phone_id = phone_id_part.replace(".php", "")
-        return f"{base}-reviews-{phone_id}.php"
-    except Exception:
-        return None
+@st.cache_data(ttl=3600)
+def get_reviews_from_db(phone_model: str, limit: int = 500) -> List[str]:
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("SELECT review_text FROM reviews WHERE phone_model = ? ORDER BY id DESC LIMIT ?", (phone_model, limit))
+    rows = cur.fetchall()
+    conn.close()
+    return [r[0] for r in rows]
 
 # -----------------------------
-# Specs scraper
+# SIMPLE GSMARENA SCRAPER
+# User can paste a GSMArena "reviews" page URL.
+# The function is intentionally conservative (polite delay + robust selectors).
 # -----------------------------
-@st.cache_data(ttl=86400, show_spinner="📊 Fetching specs...")
-def fetch_gsmarena_specs(url: str):
-    # (Rest of the function is unchanged and correct)
-    # ...
-    specs = {}
-    key_map = {
-        "Display": ["Display", "Screen", "Size"],
-        "Processor": ["Chipset", "CPU", "Processor", "SoC"],
-        "RAM": ["Internal", "Memory", "RAM"],
-        "Storage": ["Internal", "Storage", "Memory"],
-        "Camera": ["Main Camera", "Triple", "Quad", "Dual", "Camera"],
-        "Battery": ["Battery"],
-        "OS": ["OS", "Android", "iOS"]
-    }
-    if not url:
-        return {k: "Not specified" for k in key_map.keys()}
-    try:
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-        r = requests.get(url, headers=headers, timeout=15)
-        r.raise_for_status()
-        soup = BeautifulSoup(r.text, "html.parser")
-
-        # Try multiple containers
-        rows = soup.select(".article-info table tr") or soup.select("#specs-list table tr") or soup.select("table.specs tr")
-        for row in rows:
-            th = row.find("td", class_="ttl") or row.find("th") or row.find("td", class_="spec-title")
-            td = row.find("td", class_="nfo") or (row.find_all("td")[-1] if row.find_all("td") else None)
-            if not th or not td:
-                continue
-            key = th.get_text(strip=True)
-            val = td.get_text(" ", strip=True)
-            for field, keywords in key_map.items():
-                if any(k.lower() in key.lower() for k in keywords):
-                    if field in ("RAM", "Storage"):
-                        matches = re.findall(r"(\d+)\s*GB", val, flags=re.IGNORECASE)
-                        if matches:
-                            # heuristics: first is RAM, last is Storage if both present
-                            if field == "RAM":
-                                specs["RAM"] = f"{matches[0]}GB RAM"
-                                if len(matches) > 1 and "Storage" not in specs:
-                                    specs["Storage"] = f"{matches[1]}GB Storage"
-                            else:
-                                specs["Storage"] = f"{matches[-1]}GB Storage"
-                        else:
-                            specs[field] = val
-                    else:
-                        specs[field] = val
-                    break
-    except Exception as e:
-        st.warning(f"⚠️ GSMArena specs fetch failed: {e}")
-
-    # Ensure presence of all keys
-    for k in ["Display", "Processor", "RAM", "Storage", "Camera", "Battery", "OS"]:
-        specs.setdefault(k, "Not specified")
-
-    return specs
-# -----------------------------
-# Reviews scraper with better pagination detection
-# -----------------------------
-@st.cache_data(ttl=21600, show_spinner="💬 Fetching user reviews...")
-def fetch_gsmarena_reviews(url: str, limit: int = 1000):
-    # (Rest of the function is largely unchanged)
-    # ...
-    reviews = []
-    if not url:
-        return reviews
-
+def fetch_gsmarena_reviews(review_page_url: str, max_reviews: int = 200) -> List[str]:
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5",
-        "Accept-Encoding": "gzip, deflate",
-        "Connection": "keep-alive",
-        "Upgrade-Insecure-Requests": "1",
+        "User-Agent": "Mozilla/5.0 (compatible; bot/0.1; +https://example.com/bot)"
     }
-    
-    page_url = url
-    visited_urls = set()
-    page_count = 0
-    max_pages = 50 
-
+    reviews = []
     try:
-        while page_url and len(reviews) < limit and page_count < max_pages:
-            if page_url in visited_urls:
-                st.warning(f"🔄 Breaking pagination loop - already visited: {page_url}")
-                break
-            
-            visited_urls.add(page_url)
-            page_count += 1
-            
-            st.info(f"📖 Scraping page {page_count}: {len(reviews)} reviews so far...")
-            
-            time.sleep(2)  
-            r = requests.get(page_url, headers=headers, timeout=15)
-            r.raise_for_status()
-            soup = BeautifulSoup(r.text, "html.parser")
+        r = requests.get(review_page_url, headers=headers, timeout=15)
+        r.raise_for_status()
+        soup = BeautifulSoup(r.text, "html.parser")
 
-            # ... (Review block extraction logic is unchanged and correct)
-            review_blocks = []
-            
-            selectors_to_try = [
-                ".opin",  
-                ".user-opinion", 
-                ".uopin",
-                ".user-review",
-                ".review-item",
-                ".review-content",
-                ".opinion",
-                "div[id*='opin']", 
-                "div.thread-item",
-                ".thread .post",
-                ".user-thread .post"
-            ]
-            
-            for selector in selectors_to_try:
-                blocks = soup.select(selector)
-                if blocks:
-                    review_blocks.extend(blocks)
-                    break 
-            
-            if not review_blocks:
-                all_divs = soup.find_all('div')
-                for div in all_divs:
-                    text = div.get_text(strip=True)
-                    if (50 < len(text) < 2000 and 
-                        any(word in text.lower() for word in ['phone', 'battery', 'camera', 'display', 'good', 'bad', 'excellent', 'terrible']) and
-                        not any(skip in text.lower() for skip in ['gsmarena', 'admin', 'moderator', 'advertisement'])):
-                        review_blocks.append(div)
-
-            new_reviews_count = 0
-            for block in review_blocks:
-                text = block.get_text(" ", strip=True)
-                
-                if (30 < len(text) < 1500 and 
-                    not any(skip in text.lower() for skip in [
-                        'gsmarena', 'admin', 'moderator', 'delete', 'report', 
-                        'advertisement', 'sponsored', 'click here', 'visit our',
-                        'terms of service', 'privacy policy'
-                    ]) and
-                    any(keyword in text.lower() for keyword in [
-                        'phone', 'battery', 'camera', 'display', 'screen', 
-                        'performance', 'android', 'ios', 'good', 'bad', 'love', 'hate',
-                        'recommend', 'buy', 'excellent', 'terrible', 'amazing', 'awful'
-                    ])):
-                    
-                    if text not in [r[:100] for r in reviews]:  
-                        reviews.append(text)
-                        new_reviews_count += 1
-                        if len(reviews) >= limit:
-                            break
-
-            st.info(f"✅ Found {new_reviews_count} new reviews on page {page_count} (total: {len(reviews)})")
-            
-            if new_reviews_count == 0:
-                st.warning(f"⚠️ No new reviews found on page {page_count}, stopping pagination")
+        # GSMArena sometimes uses divs with class "uopin" or ".opin"
+        selectors = [".opin", ".user-opinion", ".uopin", ".review-content", ".opinion", ".user-review"]
+        blocks = []
+        for sel in selectors:
+            found = soup.select(sel)
+            if found:
+                blocks = found
                 break
 
-            # ... (Pagination detection logic is unchanged and correct)
-            next_link = None
-            
-            next_candidates = [
-                soup.find("a", string=re.compile(r"next", re.I)),
-                soup.find("a", {"title": re.compile(r"next", re.I)}),
-                soup.select_one("a.pages-next"),
-                soup.find("a", attrs={"rel": "next"}),
-                soup.select_one(".pagination a[href*='page=']:last-child"),
-            ]
-            
-            for candidate in next_candidates:
-                if candidate and candidate.has_attr("href"):
-                    next_link = candidate
-                    break
-            
-            if not next_link:
-                current_page = page_count
-                page_links = soup.find_all("a", href=re.compile(r"page=\d+"))
-                for link in page_links:
-                    href = link["href"]
-                    match = re.search(r"page=(\d+)", href)
-                    if match and int(match.group(1)) == current_page + 1:
-                        next_link = link
-                        break
-            
-            if not next_link and "page=" in page_url:
-                try:
-                    parsed = urlparse(page_url)
-                    query_params = parse_qs(parsed.query)
-                    
-                    current_page_num = 1
-                    if 'page' in query_params:
-                        current_page_num = int(query_params['page'][0])
-                    
-                    query_params['page'] = [str(current_page_num + 1)]
-                    new_query = urlencode(query_params, doseq=True)
-                    next_page_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}?{new_query}"
-                    
-                    if next_page_url != page_url:
-                        page_url = next_page_url
-                        continue
-                except Exception as e:
-                    st.warning(f"Failed to construct next page URL: {e}")
-            
-            elif not next_link and "page=" not in page_url:
-                separator = "&" if "?" in page_url else "?"
-                next_page_url = f"{page_url}{separator}page=2"
-                page_url = next_page_url
-                continue
-            
-            if next_link:
-                href = next_link["href"]
-                if href.startswith("http"):
-                    page_url = href
-                else:
-                    # Minor improvement: use the site's base URL for safety
-                    page_url = urljoin("https://www.gsmarena.com/", href) 
-                st.info(f"🔗 Found next page: {page_url}")
+        # fallback to paragraphs under reviews container
+        if not blocks:
+            container = soup.select_one("#review")
+            if container:
+                blocks = container.find_all("p")
             else:
-                st.info("🏁 No more pagination links found")
-                break
+                blocks = soup.find_all("p")
+
+        for b in blocks:
+            text = b.get_text(" ", strip=True)
+            if text and len(text) > 30:  # filter out tiny bits
+                reviews.append(text)
+                if len(reviews) >= max_reviews:
+                    break
 
     except Exception as e:
-        st.error(f"⚠️ GSMArena reviews fetch failed: {e}")
-        import traceback
-        st.error(traceback.format_exc())
+        st.warning(f"Scrape failed: {e}")
 
-    st.success(f"🎉 Successfully collected {len(reviews)} reviews from {page_count} pages")
-    return reviews[:limit]
+    time.sleep(1)  # polite pause for future calls
+    return reviews
 
-# (The rest of the file: Prompt Builders, Summarization Pipeline, and Streamlit UI remains the same)
+# -----------------------------
+# SENTIMENT MODEL (TF-IDF -> Logistic Regression)
+# - If a saved model exists, load it.
+# - Otherwise, auto-train a tiny starter model (NOT production quality).
+#   Replace starter data with your labeled dataset for best results.
+# -----------------------------
+@st.cache_resource
+def load_or_train_model():
+    if MODEL_PATH.exists():
+        try:
+            model = joblib.load(MODEL_PATH)
+            return model
+        except Exception:
+            st.warning("Saved model exists but failed to load. Re-training.")
+    # Starter training data (very small). Replace with your labeled dataset.
+    X_train = [
+        "Battery life is excellent, lasts all day",
+        "Amazing camera and photos are crisp",
+        "Screen is vibrant and bright",
+        "Phone is snappy and fast",
+        "Battery drains quickly, terrible",
+        "Camera is awful, pictures are noisy",
+        "Screen flickers and is dim",
+        "Phone lags and freezes sometimes",
+    ]
+    y_train = ["POSITIVE", "POSITIVE", "POSITIVE", "POSITIVE", "NEGATIVE", "NEGATIVE", "NEGATIVE", "NEGATIVE"]
+
+    pipeline = Pipeline([
+        ("tfidf", TfidfVectorizer(max_features=5000, ngram_range=(1,2))),
+        ("clf", LogisticRegression(max_iter=1000))
+    ])
+
+    pipeline.fit(X_train, y_train)
+    # Save model
+    joblib.dump(pipeline, MODEL_PATH)
+    return pipeline
+
+model_pipeline = load_or_train_model()
+
+# -----------------------------
+# PREDICTION & ASPECT ANALYSIS
+# -----------------------------
+def predict_sentiment(texts: List[str]) -> List[Tuple[str, float]]:
+    """
+    Returns list of (label, score) for each text.
+    Score is the predicted probability for the chosen label.
+    """
+    if not texts:
+        return []
+    preds = model_pipeline.predict(texts)
+    if hasattr(model_pipeline, "predict_proba"):
+        probs = model_pipeline.predict_proba(texts)
+        # find probability for predicted class
+        label_index = {lab: i for i, lab in enumerate(model_pipeline.classes_)}
+        results = []
+        for i, lab in enumerate(preds):
+            prob = float(probs[i, label_index[lab]])
+            results.append((lab, prob))
+        return results
+    else:
+        # fallback: no probabilities
+        return [(str(lab), 0.0) for lab in preds]
+
+def aspect_based_sentiment(reviews: List[str]) -> Dict[str, float]:
+    """
+    For each aspect, collect sentences that mention aspect keywords,
+    run sentiment classifier, then compute mean polarity score (-1 to +1).
+    """
+    aspect_scores = {}
+    for aspect, keywords in ASPECT_KEYWORDS.items():
+        hits = []
+        for r in reviews:
+            low = r.lower()
+            if any(k in low for k in keywords):
+                hits.append(r)
+        if not hits:
+            aspect_scores[aspect] = 0.0
+            continue
+        preds = predict_sentiment(hits)
+        # map POSITIVE -> +1, NEGATIVE -> -1
+        mapped = []
+        for lab, score in preds:
+            if lab.upper().startswith("POS"):
+                mapped.append(1.0 * (score if score>0 else 1.0))
+            else:
+                mapped.append(-1.0 * (score if score>0 else 1.0))
+        # average, normalize to -1..+1
+        aspect_scores[aspect] = float(sum(mapped) / len(mapped)) if mapped else 0.0
+    return aspect_scores
+
+# -----------------------------
+# SUMMARY & PROS/CONS EXTRACTION
+# -----------------------------
+def summarize_reviews(reviews: List[str]) -> str:
+    text = " ".join(reviews)
+    if not text.strip():
+        return ""
+    if SUMMA_AVAILABLE:
+        try:
+            s = summarizer.summarize(text, ratio=0.03)
+            if s and len(s) > 30:
+                return s
+        except Exception:
+            pass
+    # fallback: return first 3 longish sentences
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+    long_sents = [s for s in sentences if len(s) > 40]
+    return " ".join(long_sents[:3]) if long_sents else (sentences[0] if sentences else "")
+
+def extract_pros_cons(reviews: List[str], top_n: int = 3) -> Tuple[List[str], List[str]]:
+    pos = []
+    neg = []
+    preds = predict_sentiment(reviews)
+    for (lab, score), review in zip(preds, reviews):
+        if lab.upper().startswith("POS"):
+            pos.append(review)
+        else:
+            neg.append(review)
+    return pos[:top_n], neg[:top_n]
+
+# -----------------------------
+# STREAMLIT APP UI
+# -----------------------------
+st.set_page_config(page_title="Phone Review Analyzer (SQLite + scikit-learn)", layout="wide")
+st.title("📱 Phone Review Analyzer — full DS (SQLite + scikit-learn)")
+
+# Initialize DB
+init_db()
+
+with st.sidebar:
+    st.header("Options")
+    phone = st.text_input("Phone model (identifier stored in DB)", value="Samsung Galaxy S24")
+    gsmarena_url = st.text_input("Optional: GSMArena review page URL (paste full reviews page URL)")
+    max_scrape = st.slider("Max reviews to scrape (if scraping)", 10, 500, 150, step=10)
+    clear_db = st.button("⚠️ Clear cached reviews for this phone")
+
+if clear_db:
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("DELETE FROM reviews WHERE phone_model = ?", (phone,))
+    conn.commit()
+    conn.close()
+    st.success("Cleared reviews for phone from DB.")
+
+if st.button("🔎 Load / Analyze"):
+    if not phone:
+        st.error("Please enter a phone model identifier (any string).")
+    else:
+        # 1) Try DB
+        reviews = get_reviews_from_db(phone)
+        if not reviews and gsmarena_url:
+            st.info("No cached reviews found. Scraping provided GSMArena URL...")
+            scraped = fetch_gsmarena_reviews(gsmarena_url, max_reviews=max_scrape)
+            if scraped:
+                save_reviews_to_db(phone, scraped)
+                reviews = get_reviews_from_db(phone)
+                st.success(f"Scraped & saved {len(scraped)} reviews.")
+            else:
+                st.warning("Scraper didn't find reviews or failed. Check the URL.")
+        elif not reviews:
+            st.warning("No reviews in DB for this phone. Provide a GSMArena review URL to scrape or add reviews manually.")
+        else:
+            st.success(f"Loaded {len(reviews)} cached reviews from DB (latest first).")
+
+        if reviews:
+            # Basic preview and download
+            st.subheader("Sample reviews (most recent)")
+            for i, r in enumerate(reviews[:5], 1):
+                st.write(f"**{i}.** {r[:400]}{'...' if len(r)>400 else ''}")
+
+            if st.button("Download all reviews as CSV"):
+                df = pd.DataFrame({"review_text": reviews})
+                st.download_button("Download CSV", df.to_csv(index=False).encode("utf-8"), file_name=f"{phone}_reviews.csv", mime="text/csv")
+
+            # 2) Sentiment analysis + ABSA
+            st.subheader("🔬 Analysis results")
+            with st.spinner("Running aspect-based sentiment..."):
+                aspect_scores = aspect_based_sentiment(reviews)
+            df_aspect = pd.DataFrame(list(aspect_scores.items()), columns=["Aspect", "Score"])
+            st.table(df_aspect)
+
+            # bar chart
+            st.bar_chart(df_aspect.set_index("Aspect"))
+
+            # pros & cons
+            pros, cons = extract_pros_cons(reviews, top_n=5)
+            st.subheader("✅ Pros (sample)")
+            if pros:
+                for p in pros:
+                    st.success(p)
+            else:
+                st.write("No positive sentences detected.")
+
+            st.subheader("❌ Cons (sample)")
+            if cons:
+                for c in cons:
+                    st.error(c)
+            else:
+                st.write("No negative sentences detected.")
+
+            # summary & verdict
+            summary = summarize_reviews(reviews)
+            st.subheader("📝 Summary (extractive)")
+            st.write(summary or "No summary available.")
+
+            # Simple aggregate verdict
+            avg_score = sum(aspect_scores.values()) / max(len(aspect_scores), 1)
+            verdict = "Positive overall" if avg_score > 0.1 else ("Negative overall" if avg_score < -0.1 else "Mixed / Neutral")
+            st.info(f"📣 Verdict: **{verdict}** (avg aspect score = {avg_score:.2f})")
+
+            # JSON output
+            out = {
+                "phone_model": phone,
+                "num_reviews": len(reviews),
+                "aspect_scores": aspect_scores,
+                "pros_sample": pros,
+                "cons_sample": cons,
+                "summary": summary,
+                "verdict": verdict
+            }
+            st.download_button("📥 Download JSON summary", json.dumps(out, indent=2, ensure_ascii=False), file_name=f"{phone}_summary.json", mime="application/json")
