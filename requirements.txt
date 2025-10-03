@@ -8,3 +8,4 @@ google-genai
 google-api-core
 google-auth
 protobuf
+google-generativeai
