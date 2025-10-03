@@ -1,8 +1,9 @@
 streamlit
-requests
-beautifulsoup4
 pandas
-google-genai
-google-generativeai
+numpy
+scikit-learn
+beautifulsoup4
+requests
 lxml
-matplotlib
+nltk
+joblib
