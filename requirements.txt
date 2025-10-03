@@ -1,8 +1,6 @@
-streamlit
-pandas
-beautifulsoup4
-requests
-scikit-learn
-supabase
-joblib
-summa
+streamlit==1.26.0
+pandas==2.1.0
+requests==2.32.0
+beautifulsoup4==4.12.2
+textblob==0.17.1
+lxml==4.9.3
