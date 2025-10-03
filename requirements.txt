@@ -2,7 +2,9 @@ streamlit
 pandas
 requests
 beautifulsoup4
-google-genai==0.17.0
+google-genai
+
+# Keep these auxiliary libraries to hopefully fix the namespace issue
 google-api-core
 google-auth
 protobuf
