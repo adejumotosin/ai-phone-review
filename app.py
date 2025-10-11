@@ -50,7 +50,7 @@ except Exception:
     st.error("Error: Groq API key not found in `.streamlit/secrets.toml`. Please set it up.")
     st.stop()
 
-# --- User Input Form (Fixed with current models) ---
+# --- User Input Form (Updated with CURRENT supported models) ---
 with st.form("product_review_form"):
     product_name = st.text_input(
         "Enter Product Name",
@@ -58,18 +58,20 @@ with st.form("product_review_form"):
         placeholder="e.g., Sony WH-1000XM5, Nintendo Switch OLED, MacBook Pro M3"
     )
     
-    # Model selection - UPDATED with currently supported models
+    # Model selection - UPDATED with currently active models as of late 2024/early 2025
     model_choice = st.selectbox(
         "Select AI Model",
         (
-            "llama-3.1-70b-versatile",  # Replacement for the decommissioned llama3-70b-8192
-            "llama-3.3-70b-versatile",  # Newer 70B model
-            "llama-3.1-8b-instant",     # Faster, smaller model
-            "mixtral-8x7b-32768",       # Alternative powerful model
-            "gemma2-9b-it"              # Google's Gemma model
+            "llama-3.3-70b-versatile",      # Latest 70B Llama model
+            "llama-3.1-8b-instant",         # Fast 8B model
+            "llama3-groq-70b-8192-tool-use-preview",  # Tool use optimized
+            "llama3-groq-8b-8192-tool-use-preview",   # Smaller tool use model
+            "mixtral-8x7b-32768",           # Mixtral model
+            "gemma2-9b-it",                 # Google Gemma
+            "llama3-8b-8192",               # Standard Llama 3 8B
         ),
         index=0,
-        help="llama-3.1-70b-versatile or llama-3.3-70b-versatile are recommended for complex reasoning"
+        help="llama-3.3-70b-versatile is recommended for best quality and complex reasoning"
     )
 
     submit_button = st.form_submit_button("Generate Review")
