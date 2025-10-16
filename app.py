@@ -1054,4 +1054,15 @@ Feel free to ask me any questions about this product!"""
                     })
                     
                     st.rerun()
-      
+                    
+                except ProductReviewError as e:
+                    st.error(f"❌ {e}")
+                except Exception as e:
+                    st.error(f"❌ Unexpected error: {e}")
+    
+    else:
+        # Chat interface
+        ui.render_chat_interface()
+
+if __name__ == "__main__":
+    main()
