@@ -491,44 +491,158 @@ class ContentScraper:
 # =============================================================================
 
 class ProductImageFetcher:
+
     """Fetches product images from multiple sources"""
+
     
+
     def __init__(self, cache_manager: CacheManager, config: AppConfig):
+
         self.cache = cache_manager
+
         self.config = config
+
         self.session = requests.Session()
+
         self.session.headers.update({'User-Agent': Constants.USER_AGENT})
+
     
+
+    # ========== REPLACE/ADD THESE TWO METHODS ==========
+
+    
+
     def fetch_product_images(self, product_name: str, max_images: int = 5) -> List[ProductImage]:
-        """Fetch product images from multiple sources"""
+
+        """Fetch product images from multiple sources with improved accuracy"""
+
         cache_key = self.cache._get_cache_key(f"images_{product_name}")
+
         cached_images = self.cache.get(cache_key)
+
         
+
         if cached_images:
+
             logger.info(f"Using cached images for: {product_name}")
+
             return [ProductImage(**img) for img in cached_images]
+
         
+
+        # Enhance search query for better accuracy
+
+        enhanced_query = self._enhance_image_query(product_name)
+
+        logger.info(f"Enhanced image query: {enhanced_query}")
+
+        
+
         images = []
+
         
+
         # Try multiple image sources
+
         try:
-            # Source 1: DuckDuckGo Images
-            ddg_images = self._fetch_duckduckgo_images(product_name, max_images)
+
+            # Source 1: DuckDuckGo Images with enhanced query
+
+            ddg_images = self._fetch_duckduckgo_images(enhanced_query, max_images)
+
             images.extend(ddg_images)
+
             
+
             # Source 2: Bing Images (fallback)
+
             if len(images) < max_images:
-                bing_images = self._fetch_bing_images(product_name, max_images - len(images))
+
+                bing_images = self._fetch_bing_images(enhanced_query, max_images - len(images))
+
                 images.extend(bing_images)
+
             
+
         except Exception as e:
+
             logger.error(f"Image fetching failed: {e}")
+
         
+
         # Cache results
+
         if images:
+
             self.cache.set(cache_key, [img.dict() for img in images[:max_images]])
+
         
+
         return images[:max_images]
+
+    
+
+    def _enhance_image_query(self, product_name: str) -> str:
+
+        """Enhance search query for more accurate product images"""
+
+        product_lower = product_name.lower()
+
+        
+
+        # Product category keywords to add specificity
+
+        category_keywords = {
+
+            'tv': ['television', 'screen', 'display'],
+
+            'phone': ['smartphone', 'mobile'],
+
+            'laptop': ['notebook', 'computer'],
+
+            'tablet': ['ipad', 'tab'],
+
+            'watch': ['smartwatch', 'wearable'],
+
+            'headphone': ['headset', 'earphone', 'earbuds'],
+
+            'camera': ['digital camera', 'dslr'],
+
+            'console': ['gaming console', 'game system'],
+
+            'speaker': ['bluetooth speaker', 'wireless speaker'],
+
+            'monitor': ['computer monitor', 'display screen']
+
+        }
+
+        
+
+        # Check for category matches and add specific terms
+
+        for category, keywords in category_keywords.items():
+
+            if category in product_lower:
+
+                # Add "official product" to prioritize official images
+
+                return f"{product_name} {category} official product image"
+
+            for keyword in keywords:
+
+                if keyword in product_lower:
+
+                    return f"{product_name} official product image"
+
+        
+
+        # Default: add "official product" to filter out unrelated images
+
+        return f"{product_name} official product image"
+
+    
+
+    
     
     def _fetch_duckduckgo_images(self, product_name: str, max_images: int) -> List[ProductImage]:
         """Fetch images from DuckDuckGo"""
