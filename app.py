@@ -1,7 +1,12 @@
+"""
+Complete AI Product Review Engine with Sentiment Analysis & Image Fetching
+Part 1 of 4: Core Infrastructure & Configuration
+"""
+
 import streamlit as st
 import json
 from groq import Groq
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError as PydanticValidationError
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timedelta
 import requests
@@ -15,7 +20,20 @@ from functools import wraps
 from contextlib import contextmanager
 import re
 
-# Configure logging
+# New imports for enhanced features
+from textblob import TextBlob
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+import numpy as np
+from collections import Counter
+from urllib.parse import quote_plus
+import base64
+from io import BytesIO
+from PIL import Image
+
+# =============================================================================
+# LOGGING CONFIGURATION
+# =============================================================================
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -54,7 +72,7 @@ class Constants:
     ACCEPT_LANGUAGE = "en-US,en;q=0.5"
 
 # =============================================================================
-# DATA MODELS
+# BASE DATA MODELS
 # =============================================================================
 
 class SearchResult(BaseModel):
@@ -102,7 +120,77 @@ class ProductReview(BaseModel):
         )
 
 # =============================================================================
-# EXCEPTIONS
+# ENHANCED DATA MODELS (SENTIMENT & IMAGES)
+# =============================================================================
+
+class SentimentScore(BaseModel):
+    """Detailed sentiment analysis scores"""
+    overall_sentiment: str = Field(description="Overall sentiment: Positive, Negative, or Mixed")
+    polarity_score: float = Field(ge=-1.0, le=1.0, description="Polarity: -1 (negative) to 1 (positive)")
+    subjectivity_score: float = Field(ge=0.0, le=1.0, description="Subjectivity: 0 (objective) to 1 (subjective)")
+    
+    # VADER compound scores
+    compound_score: float = Field(ge=-1.0, le=1.0, description="VADER compound score")
+    positive_ratio: float = Field(ge=0.0, le=1.0, description="Positive sentiment ratio")
+    negative_ratio: float = Field(ge=0.0, le=1.0, description="Negative sentiment ratio")
+    neutral_ratio: float = Field(ge=0.0, le=1.0, description="Neutral sentiment ratio")
+    
+    # Advanced metrics
+    sentiment_confidence: float = Field(ge=0.0, le=1.0, description="Confidence in sentiment assessment")
+    emotional_tone: str = Field(description="Dominant emotional tone")
+    key_positive_aspects: List[str] = Field(default=[], description="Most positive aspects")
+    key_negative_aspects: List[str] = Field(default=[], description="Most negative aspects")
+    
+    @property
+    def sentiment_emoji(self) -> str:
+        """Get emoji representation of sentiment"""
+        if self.compound_score >= 0.5:
+            return "😊"
+        elif self.compound_score >= 0.1:
+            return "🙂"
+        elif self.compound_score >= -0.1:
+            return "😐"
+        elif self.compound_score >= -0.5:
+            return "😕"
+        else:
+            return "😞"
+    
+    @property
+    def sentiment_color(self) -> str:
+        """Get color code for sentiment"""
+        if self.compound_score >= 0.5:
+            return "#4CAF50"  # Green
+        elif self.compound_score >= 0.1:
+            return "#8BC34A"  # Light green
+        elif self.compound_score >= -0.1:
+            return "#FFC107"  # Amber
+        elif self.compound_score >= -0.5:
+            return "#FF9800"  # Orange
+        else:
+            return "#F44336"  # Red
+
+class ProductImage(BaseModel):
+    """Product image information"""
+    url: str
+    thumbnail_url: Optional[str] = None
+    source: str
+    width: Optional[int] = None
+    height: Optional[int] = None
+    alt_text: Optional[str] = None
+
+class EnhancedProductReview(ProductReview):
+    """Enhanced product review with sentiment and images"""
+    sentiment_analysis: Optional[SentimentScore] = None
+    product_images: List[ProductImage] = Field(default=[], description="Product images")
+    primary_image_url: Optional[str] = Field(default=None, description="Main product image")
+    
+    # Additional sentiment breakdowns
+    pros_sentiment: Optional[float] = None
+    cons_sentiment: Optional[float] = None
+    verdict_sentiment: Optional[float] = None
+
+# =============================================================================
+# CUSTOM EXCEPTIONS
 # =============================================================================
 
 class ProductReviewError(Exception):
@@ -199,7 +287,33 @@ class CacheManager:
             logger.warning(f"Cache write error for {key}: {e}")
 
 # =============================================================================
-# WEB SEARCH COMPONENTS
+# END OF PART 1
+# =============================================================================
+
+"""
+PART 1 SUMMARY:
+- Configuration and constants
+- Base data models (SearchResult, ScrapedContent, ProductReview)
+- Enhanced models (SentimentScore, ProductImage, EnhancedProductReview)
+- Custom exceptions
+- Cache management system
+
+NEXT IN PART 2:
+- Web search client
+- Content scraper
+- Image fetching service
+- Sentiment analysis service
+"""
+
+"""
+Complete AI Product Review Engine with Sentiment Analysis & Image Fetching
+Part 2 of 4: Web Services (Search, Scraping, Images, Sentiment)
+
+IMPORTANT: This part must be combined with Part 1 to work!
+"""
+
+# =============================================================================
+# WEB SEARCH CLIENT
 # =============================================================================
 
 class WebSearchClient:
@@ -291,6 +405,10 @@ class WebSearchClient:
             return parsed.netloc
         except:
             return ""
+
+# =============================================================================
+# CONTENT SCRAPER
+# =============================================================================
 
 class ContentScraper:
     """Handles web content scraping"""
@@ -395,7 +513,357 @@ class ContentScraper:
         return content
 
 # =============================================================================
-# AI INTEGRATION
+# PRODUCT IMAGE FETCHER
+# =============================================================================
+
+class ProductImageFetcher:
+    """Fetches product images from multiple sources"""
+    
+    def __init__(self, cache_manager: CacheManager, config: AppConfig):
+        self.cache = cache_manager
+        self.config = config
+        self.session = requests.Session()
+        self.session.headers.update({'User-Agent': Constants.USER_AGENT})
+    
+    def fetch_product_images(self, product_name: str, max_images: int = 5) -> List[ProductImage]:
+        """Fetch product images from multiple sources"""
+        cache_key = self.cache._get_cache_key(f"images_{product_name}")
+        cached_images = self.cache.get(cache_key)
+        
+        if cached_images:
+            logger.info(f"Using cached images for: {product_name}")
+            return [ProductImage(**img) for img in cached_images]
+        
+        images = []
+        
+        # Try multiple image sources
+        try:
+            # Source 1: DuckDuckGo Images
+            ddg_images = self._fetch_duckduckgo_images(product_name, max_images)
+            images.extend(ddg_images)
+            
+            # Source 2: Bing Images (fallback)
+            if len(images) < max_images:
+                bing_images = self._fetch_bing_images(product_name, max_images - len(images))
+                images.extend(bing_images)
+            
+        except Exception as e:
+            logger.error(f"Image fetching failed: {e}")
+        
+        # Cache results
+        if images:
+            self.cache.set(cache_key, [img.dict() for img in images[:max_images]])
+        
+        return images[:max_images]
+    
+    def _fetch_duckduckgo_images(self, product_name: str, max_images: int) -> List[ProductImage]:
+        """Fetch images from DuckDuckGo"""
+        try:
+            # DuckDuckGo image search
+            url = "https://duckduckgo.com/"
+            params = {'q': product_name, 'iax': 'images', 'ia': 'images'}
+            
+            response = self.session.get(url, params=params, timeout=10)
+            response.raise_for_status()
+            
+            # Parse vqd token
+            vqd_match = re.search(r'vqd=([\d-]+)', response.text)
+            if not vqd_match:
+                return []
+            
+            vqd = vqd_match.group(1)
+            
+            # Fetch actual images
+            image_url = "https://duckduckgo.com/i.js"
+            params = {
+                'q': product_name,
+                'vqd': vqd,
+                'l': 'us-en',
+                'p': '1',
+                'v7exp': 'a'
+            }
+            
+            response = self.session.get(image_url, params=params, timeout=10)
+            data = response.json()
+            
+            images = []
+            for result in data.get('results', [])[:max_images]:
+                images.append(ProductImage(
+                    url=result.get('image'),
+                    thumbnail_url=result.get('thumbnail'),
+                    source='DuckDuckGo',
+                    width=result.get('width'),
+                    height=result.get('height'),
+                    alt_text=result.get('title', product_name)
+                ))
+            
+            return images
+            
+        except Exception as e:
+            logger.warning(f"DuckDuckGo image fetch failed: {e}")
+            return []
+    
+    def _fetch_bing_images(self, product_name: str, max_images: int) -> List[ProductImage]:
+        """Fetch images from Bing (fallback method)"""
+        try:
+            url = f"https://www.bing.com/images/search?q={quote_plus(product_name)}"
+            response = self.session.get(url, timeout=10)
+            response.raise_for_status()
+            
+            soup = BeautifulSoup(response.text, 'html.parser')
+            images = []
+            
+            for img_tag in soup.find_all('a', class_='iusc')[:max_images]:
+                try:
+                    m = img_tag.get('m')
+                    if m:
+                        img_data = json.loads(m)
+                        images.append(ProductImage(
+                            url=img_data.get('murl', ''),
+                            thumbnail_url=img_data.get('turl', ''),
+                            source='Bing',
+                            alt_text=product_name
+                        ))
+                except:
+                    continue
+            
+            return images
+            
+        except Exception as e:
+            logger.warning(f"Bing image fetch failed: {e}")
+            return []
+    
+    def download_and_cache_image(self, image_url: str) -> Optional[str]:
+        """Download image and return base64 encoded string"""
+        try:
+            response = self.session.get(image_url, timeout=10, stream=True)
+            response.raise_for_status()
+            
+            # Open and resize image
+            img = Image.open(BytesIO(response.content))
+            
+            # Resize for optimization (max 800px width)
+            if img.width > 800:
+                ratio = 800 / img.width
+                new_size = (800, int(img.height * ratio))
+                img = img.resize(new_size, Image.Resampling.LANCZOS)
+            
+            # Convert to base64
+            buffer = BytesIO()
+            img.save(buffer, format='PNG')
+            img_str = base64.b64encode(buffer.getvalue()).decode()
+            
+            return f"data:image/png;base64,{img_str}"
+            
+        except Exception as e:
+            logger.warning(f"Image download failed for {image_url}: {e}")
+            return None
+
+# =============================================================================
+# SENTIMENT ANALYSIS SERVICE
+# =============================================================================
+
+class SentimentAnalyzer:
+    """Sophisticated sentiment analysis for product reviews"""
+    
+    def __init__(self):
+        self.vader = SentimentIntensityAnalyzer()
+        
+        # Product-specific sentiment lexicon enhancements
+        self.positive_terms = {
+            'excellent', 'amazing', 'outstanding', 'superb', 'fantastic',
+            'premium', 'durable', 'reliable', 'innovative', 'impressive',
+            'worth', 'recommend', 'love', 'perfect', 'flawless'
+        }
+        
+        self.negative_terms = {
+            'disappointing', 'terrible', 'awful', 'poor', 'defective',
+            'broken', 'overpriced', 'waste', 'regret', 'avoid',
+            'frustrating', 'unreliable', 'cheaply', 'horrible'
+        }
+        
+        # Aspect keywords
+        self.aspect_keywords = {
+            'quality': ['quality', 'build', 'durability', 'material', 'construction'],
+            'performance': ['performance', 'speed', 'fast', 'slow', 'responsive'],
+            'value': ['price', 'value', 'worth', 'expensive', 'cheap', 'cost'],
+            'design': ['design', 'look', 'aesthetic', 'style', 'appearance'],
+            'features': ['features', 'functionality', 'capability', 'options'],
+            'usability': ['easy', 'difficult', 'intuitive', 'complicated', 'user-friendly']
+        }
+    
+    def analyze_review(self, review: ProductReview) -> SentimentScore:
+        """Perform comprehensive sentiment analysis on product review"""
+        
+        # Combine all text for overall analysis
+        full_text = f"{review.specifications_inferred}. "
+        full_text += " ".join(review.pros) + ". "
+        full_text += " ".join(review.cons) + ". "
+        full_text += review.verdict
+        
+        # TextBlob analysis
+        blob = TextBlob(full_text)
+        polarity = blob.sentiment.polarity
+        subjectivity = blob.sentiment.subjectivity
+        
+        # VADER analysis
+        vader_scores = self.vader.polarity_scores(full_text)
+        
+        # Determine overall sentiment
+        compound = vader_scores['compound']
+        if compound >= 0.05:
+            overall = "Positive"
+        elif compound <= -0.05:
+            overall = "Negative"
+        else:
+            overall = "Mixed"
+        
+        # Calculate confidence
+        confidence = self._calculate_confidence(polarity, compound, subjectivity)
+        
+        # Emotional tone analysis
+        emotional_tone = self._determine_emotional_tone(full_text, compound)
+        
+        # Extract key aspects
+        positive_aspects = self._extract_positive_aspects(review.pros, full_text)
+        negative_aspects = self._extract_negative_aspects(review.cons, full_text)
+        
+        return SentimentScore(
+            overall_sentiment=overall,
+            polarity_score=polarity,
+            subjectivity_score=subjectivity,
+            compound_score=compound,
+            positive_ratio=vader_scores['pos'],
+            negative_ratio=vader_scores['neg'],
+            neutral_ratio=vader_scores['neu'],
+            sentiment_confidence=confidence,
+            emotional_tone=emotional_tone,
+            key_positive_aspects=positive_aspects,
+            key_negative_aspects=negative_aspects
+        )
+    
+    def analyze_text_components(self, review: ProductReview) -> Dict[str, float]:
+        """Analyze sentiment of individual review components"""
+        return {
+            'pros_sentiment': self._analyze_text(" ".join(review.pros)),
+            'cons_sentiment': self._analyze_text(" ".join(review.cons)),
+            'verdict_sentiment': self._analyze_text(review.verdict),
+            'specs_sentiment': self._analyze_text(review.specifications_inferred)
+        }
+    
+    def _analyze_text(self, text: str) -> float:
+        """Analyze sentiment of a text snippet"""
+        if not text:
+            return 0.0
+        scores = self.vader.polarity_scores(text)
+        return scores['compound']
+    
+    def _calculate_confidence(self, polarity: float, compound: float, subjectivity: float) -> float:
+        """Calculate confidence in sentiment assessment"""
+        agreement = 1.0 - abs(polarity - compound) / 2.0
+        magnitude = (abs(polarity) + abs(compound)) / 2.0
+        objectivity_factor = 1.0 - (subjectivity * 0.3)
+        
+        confidence = (agreement * 0.4 + magnitude * 0.4 + objectivity_factor * 0.2)
+        return round(confidence, 3)
+    
+    def _determine_emotional_tone(self, text: str, compound: float) -> str:
+        """Determine the dominant emotional tone"""
+        text_lower = text.lower()
+        
+        excitement_words = ['amazing', 'awesome', 'love', 'excellent', 'fantastic']
+        satisfaction_words = ['good', 'satisfied', 'happy', 'pleased', 'solid']
+        disappointment_words = ['disappointing', 'expected', 'unfortunately', 'hoped']
+        frustration_words = ['frustrating', 'annoying', 'terrible', 'horrible', 'awful']
+        
+        excitement = sum(1 for word in excitement_words if word in text_lower)
+        satisfaction = sum(1 for word in satisfaction_words if word in text_lower)
+        disappointment = sum(1 for word in disappointment_words if word in text_lower)
+        frustration = sum(1 for word in frustration_words if word in text_lower)
+        
+        if compound >= 0.5:
+            return "Enthusiastic" if excitement > satisfaction else "Satisfied"
+        elif compound >= 0.1:
+            return "Cautiously Optimistic"
+        elif compound >= -0.1:
+            return "Neutral/Balanced"
+        elif compound >= -0.5:
+            return "Disappointed" if disappointment > frustration else "Concerned"
+        else:
+            return "Frustrated" if frustration > disappointment else "Very Disappointed"
+    
+    def _extract_positive_aspects(self, pros: List[str], full_text: str) -> List[str]:
+        """Extract key positive aspects mentioned"""
+        aspects = []
+        text_lower = full_text.lower()
+        
+        for aspect, keywords in self.aspect_keywords.items():
+            for keyword in keywords:
+                if keyword in text_lower:
+                    for pro in pros:
+                        if keyword in pro.lower():
+                            aspects.append(aspect.title())
+                            break
+        
+        return list(set(aspects))[:5]
+    
+    def _extract_negative_aspects(self, cons: List[str], full_text: str) -> List[str]:
+        """Extract key negative aspects mentioned"""
+        aspects = []
+        text_lower = full_text.lower()
+        
+        for aspect, keywords in self.aspect_keywords.items():
+            for keyword in keywords:
+                if keyword in text_lower:
+                    for con in cons:
+                        if keyword in con.lower():
+                            aspects.append(aspect.title())
+                            break
+        
+        return list(set(aspects))[:5]
+    
+    def generate_sentiment_summary(self, sentiment: SentimentScore) -> str:
+        """Generate human-readable sentiment summary"""
+        summary_parts = []
+        
+        summary_parts.append(f"**Overall Sentiment:** {sentiment.overall_sentiment} {sentiment.sentiment_emoji}")
+        
+        confidence_level = "High" if sentiment.sentiment_confidence > 0.7 else "Medium" if sentiment.sentiment_confidence > 0.4 else "Low"
+        summary_parts.append(f"**Confidence:** {confidence_level} ({sentiment.sentiment_confidence:.1%})")
+        
+        summary_parts.append(f"**Tone:** {sentiment.emotional_tone}")
+        
+        summary_parts.append(f"**Score Breakdown:** {sentiment.positive_ratio:.0%} Positive, {sentiment.neutral_ratio:.0%} Neutral, {sentiment.negative_ratio:.0%} Negative")
+        
+        return "\n\n".join(summary_parts)
+
+# =============================================================================
+# END OF PART 2
+# =============================================================================
+
+"""
+PART 2 SUMMARY:
+- WebSearchClient (DuckDuckGo search)
+- ContentScraper (web scraping and cleaning)
+- ProductImageFetcher (DuckDuckGo + Bing image search)
+- SentimentAnalyzer (VADER + TextBlob dual-engine analysis)
+
+NEXT IN PART 3:
+- ReviewGenerator (AI review generation)
+- EnhancedReviewGenerator (with sentiment & images)
+- ChatService (product Q&A)
+- ProductReviewService and EnhancedProductReviewService
+"""
+
+"""
+Complete AI Product Review Engine with Sentiment Analysis & Image Fetching
+Part 3 of 4: AI Integration & Service Layer
+
+IMPORTANT: This part must be combined with Parts 1 & 2 to work!
+"""
+
+# =============================================================================
+# AI REVIEW GENERATOR
 # =============================================================================
 
 class ReviewGenerator:
@@ -430,7 +898,7 @@ class ReviewGenerator:
             
             return validated_review
             
-        except ValidationError:
+        except PydanticValidationError:
             raise
         except Exception as e:
             logger.error(f"AI review generation failed: {e}")
@@ -512,9 +980,56 @@ Be critical and honest. Include issues mentioned in sources."""
             
             return ProductReview(**review_data)
             
-        except ValidationError as e:
+        except PydanticValidationError as e:
             logger.error(f"Review validation failed: {e}")
             raise ValidationError(f"Invalid review data: {e}")
+
+# =============================================================================
+# ENHANCED REVIEW GENERATOR (WITH SENTIMENT & IMAGES)
+# =============================================================================
+
+class EnhancedReviewGenerator(ReviewGenerator):
+    """Review generator with sentiment analysis and image fetching"""
+    
+    def __init__(self, groq_client: Groq, config: AppConfig, 
+                 sentiment_analyzer: SentimentAnalyzer,
+                 image_fetcher: ProductImageFetcher):
+        super().__init__(groq_client, config)
+        self.sentiment_analyzer = sentiment_analyzer
+        self.image_fetcher = image_fetcher
+    
+    def generate_enhanced_review(self, product_name: str, search_results: List[SearchResult],
+                                scraped_content: List[ScrapedContent]) -> EnhancedProductReview:
+        """Generate review with sentiment analysis and images"""
+        
+        # Generate base review
+        base_review = super().generate_web_review(product_name, search_results, scraped_content)
+        
+        # Fetch product images
+        logger.info("Fetching product images...")
+        product_images = self.image_fetcher.fetch_product_images(product_name, max_images=5)
+        
+        # Perform sentiment analysis
+        logger.info("Analyzing sentiment...")
+        sentiment = self.sentiment_analyzer.analyze_review(base_review)
+        component_sentiments = self.sentiment_analyzer.analyze_text_components(base_review)
+        
+        # Create enhanced review
+        enhanced_review = EnhancedProductReview(
+            **base_review.dict(),
+            sentiment_analysis=sentiment,
+            product_images=product_images,
+            primary_image_url=product_images[0].url if product_images else None,
+            pros_sentiment=component_sentiments['pros_sentiment'],
+            cons_sentiment=component_sentiments['cons_sentiment'],
+            verdict_sentiment=component_sentiments['verdict_sentiment']
+        )
+        
+        return enhanced_review
+
+# =============================================================================
+# CHAT SERVICE
+# =============================================================================
 
 class ChatService:
     """Handles product chat conversations"""
@@ -590,7 +1105,7 @@ Current Product Context:
         return base_prompt
 
 # =============================================================================
-# MAIN SERVICE
+# MAIN PRODUCT REVIEW SERVICE
 # =============================================================================
 
 class ProductReviewService:
@@ -641,7 +1156,104 @@ class ProductReviewService:
         return self.review_generator.generate_ai_knowledge_review(product_name)
 
 # =============================================================================
-# STREAMLIT UI COMPONENTS
+# ENHANCED PRODUCT REVIEW SERVICE (WITH SENTIMENT & IMAGES)
+# =============================================================================
+
+class EnhancedProductReviewService(ProductReviewService):
+    """Enhanced service with sentiment analysis and image fetching"""
+    
+    def __init__(self, groq_api_key: str, config: AppConfig = None):
+        super().__init__(groq_api_key, config)
+        
+        # Initialize new components
+        self.sentiment_analyzer = SentimentAnalyzer()
+        self.image_fetcher = ProductImageFetcher(self.cache_manager, self.config)
+        
+        # Replace review generator with enhanced version
+        self.review_generator = EnhancedReviewGenerator(
+            self.groq_client,
+            self.config,
+            self.sentiment_analyzer,
+            self.image_fetcher
+        )
+    
+    def generate_review(self, product_name: str, use_web_search: bool = True) -> EnhancedProductReview:
+        """Generate enhanced product review with sentiment and images"""
+        try:
+            if use_web_search:
+                return self._generate_enhanced_web_review(product_name)
+            else:
+                return self._generate_enhanced_ai_review(product_name)
+                
+        except ProductReviewError:
+            raise
+        except Exception as e:
+            logger.error(f"Unexpected error generating enhanced review: {e}")
+            raise ProductReviewError(f"Failed to generate review: {str(e)}")
+    
+    def _generate_enhanced_web_review(self, product_name: str) -> EnhancedProductReview:
+        """Generate review with web search, sentiment, and images"""
+        # Search and scrape
+        search_results = self.search_client.search_products(product_name)
+        if not search_results:
+            raise SearchError("No search results found")
+        
+        scraped_content = self.scraper.scrape_content(search_results)
+        
+        # Generate enhanced review
+        return self.review_generator.generate_enhanced_review(
+            product_name, search_results, scraped_content
+        )
+    
+    def _generate_enhanced_ai_review(self, product_name: str) -> EnhancedProductReview:
+        """Generate AI knowledge review with sentiment and images"""
+        base_review = self.review_generator.generate_ai_knowledge_review(product_name)
+        
+        # Add images
+        product_images = self.image_fetcher.fetch_product_images(product_name, max_images=5)
+        
+        # Add sentiment
+        sentiment = self.sentiment_analyzer.analyze_review(base_review)
+        component_sentiments = self.sentiment_analyzer.analyze_text_components(base_review)
+        
+        return EnhancedProductReview(
+            **base_review.dict(),
+            sentiment_analysis=sentiment,
+            product_images=product_images,
+            primary_image_url=product_images[0].url if product_images else None,
+            pros_sentiment=component_sentiments['pros_sentiment'],
+            cons_sentiment=component_sentiments['cons_sentiment'],
+            verdict_sentiment=component_sentiments['verdict_sentiment']
+        )
+
+# =============================================================================
+# END OF PART 3
+# =============================================================================
+
+"""
+PART 3 SUMMARY:
+- ReviewGenerator (base AI review generation from web data)
+- EnhancedReviewGenerator (adds sentiment analysis & image fetching)
+- ChatService (handles product Q&A conversations)
+- ProductReviewService (orchestrates the review generation pipeline)
+- EnhancedProductReviewService (full-featured service with all enhancements)
+
+NEXT IN PART 4 (FINAL):
+- StreamlitUI (base UI components)
+- EnhancedStreamlitUI (UI with sentiment visualization & image galleries)
+- Main application entry point
+- Complete integration and error handling
+"""
+
+"""
+Complete AI Product Review Engine with Sentiment Analysis & Image Fetching
+Part 4 of 4 (FINAL): Streamlit UI & Main Application
+
+IMPORTANT: This is the final part. Combine with Parts 1, 2, and 3 for the complete application!
+"""
+
+# =============================================================================
+# BASE STREAMLIT UI
 # =============================================================================
 
 class StreamlitUI:
@@ -954,115 +1566,429 @@ class StreamlitUI:
         st.session_state.chat_mode = False
 
 # =============================================================================
+# ENHANCED STREAMLIT UI (WITH SENTIMENT & IMAGES)
+# =============================================================================
+
+class EnhancedStreamlitUI(StreamlitUI):
+    """Enhanced UI with image display and sentiment visualization"""
+    
+    def __init__(self, review_service: EnhancedProductReviewService):
+        super().__init__(review_service)
+    
+    def render_review_display(self, review: EnhancedProductReview):
+        """Display enhanced review with images and sentiment"""
+        st.markdown("---")
+        
+        # Header with image
+        if hasattr(review, 'primary_image_url') and review.primary_image_url:
+            col_img, col_info = st.columns([1, 2])
+            
+            with col_img:
+                try:
+                    st.image(review.primary_image_url, use_container_width=True, caption=review.product_name)
+                except:
+                    st.info("📷 Image unavailable")
+                
+                # Image gallery
+                if hasattr(review, 'product_images') and len(review.product_images) > 1:
+                    with st.expander("🖼️ View More Images"):
+                        img_cols = st.columns(3)
+                        for idx, img in enumerate(review.product_images[1:4]):
+                            with img_cols[idx % 3]:
+                                try:
+                                    st.image(img.thumbnail_url or img.url, use_container_width=True)
+                                except:
+                                    pass
+            
+            with col_info:
+                st.header(f"📱 {review.product_name}")
+                
+                # Rating and sentiment
+                col_rating, col_sentiment = st.columns(2)
+                with col_rating:
+                    st.markdown(f"### ⭐ {review.predicted_rating}")
+                with col_sentiment:
+                    if hasattr(review, 'sentiment_analysis') and review.sentiment_analysis:
+                        st.markdown(f"### {review.sentiment_analysis.sentiment_emoji} {review.sentiment_analysis.overall_sentiment}")
+                
+                # Data source
+                if review.data_source_type == 'free_web_search':
+                    st.success(f"🌐 Live data from {len(review.sources)} sources")
+                else:
+                    st.info("🤖 AI Knowledge Base")
+        else:
+            # Fallback layout without image
+            st.header(f"📱 {review.product_name}")
+            col_rating, col_sentiment = st.columns(2)
+            with col_rating:
+                st.markdown(f"### ⭐ {review.predicted_rating}")
+            with col_sentiment:
+                if hasattr(review, 'sentiment_analysis') and review.sentiment_analysis:
+                    st.markdown(f"### {review.sentiment_analysis.sentiment_emoji} {review.sentiment_analysis.overall_sentiment}")
+        
+        st.markdown("---")
+        
+        # Sentiment Analysis Section
+        if hasattr(review, 'sentiment_analysis') and review.sentiment_analysis:
+            self._render_sentiment_analysis(review.sentiment_analysis)
+            st.markdown("---")
+        
+        # Price and specs
+        col_price, col_specs = st.columns([1, 2])
+        
+        with col_price:
+            st.markdown("### 💰 Pricing")
+            st.info(review.price_info)
+        
+        with col_specs:
+            st.markdown("### 🔧 Key Specifications")
+            st.info(review.specifications_inferred)
+        
+        st.markdown("---")
+        
+        # Pros and Cons with sentiment indicators
+        col_pros, col_cons = st.columns(2)
+        
+        with col_pros:
+            st.markdown("### 🟢 Strengths")
+            if hasattr(review, 'pros_sentiment') and review.pros_sentiment:
+                sentiment_color = self._get_sentiment_color(review.pros_sentiment)
+                st.markdown(f"<span style='color: {sentiment_color}'>Sentiment Score: {review.pros_sentiment:+.2f}</span>", 
+                          unsafe_allow_html=True)
+            for i, pro in enumerate(review.pros[:10], 1):
+                st.markdown(f"**{i}.** {pro}")
+        
+        with col_cons:
+            st.markdown("### 🔴 Weaknesses")
+            if hasattr(review, 'cons_sentiment') and review.cons_sentiment:
+                sentiment_color = self._get_sentiment_color(review.cons_sentiment)
+                st.markdown(f"<span style='color: {sentiment_color}'>Sentiment Score: {review.cons_sentiment:+.2f}</span>",
+                          unsafe_allow_html=True)
+            for i, con in enumerate(review.cons[:10], 1):
+                st.markdown(f"**{i}.** {con}")
+        
+        st.markdown("---")
+        
+        # Verdict with sentiment
+        st.markdown("### ✅ Final Verdict")
+        if hasattr(review, 'verdict_sentiment') and review.verdict_sentiment:
+            sentiment_color = self._get_sentiment_color(review.verdict_sentiment)
+            st.markdown(f"<span style='color: {sentiment_color}'>Verdict Sentiment: {review.verdict_sentiment:+.2f}</span>",
+                      unsafe_allow_html=True)
+        st.write(review.verdict)
+        
+        # Sources
+        if review.sources and review.data_source_type == 'free_web_search':
+            with st.expander("📚 Sources Used"):
+                for i, source in enumerate(review.sources, 1):
+                    st.markdown(f"{i}. [{source}]({source})")
+    
+    def _render_sentiment_analysis(self, sentiment: SentimentScore):
+        """Render detailed sentiment analysis visualization"""
+        st.markdown("### 🎭 Sentiment Analysis")
+        
+        # Summary metrics
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.metric("Overall Sentiment", sentiment.overall_sentiment, help="General sentiment classification")
+        
+        with col2:
+            st.metric("Compound Score", f"{sentiment.compound_score:+.2f}", 
+                     help="Range: -1 (very negative) to +1 (very positive)")
+        
+        with col3:
+            st.metric("Confidence", f"{sentiment.sentiment_confidence:.0%}", 
+                     help="Confidence in sentiment assessment")
+        
+        with col4:
+            st.metric("Emotional Tone", sentiment.emotional_tone, 
+                     help="Dominant emotional tone detected")
+        
+        # Sentiment breakdown chart
+        st.markdown("#### Sentiment Breakdown")
+        
+        col_chart, col_details = st.columns([2, 1])
+        
+        with col_chart:
+            # Create sentiment distribution bars
+            for category, pct, color in [
+                ('Positive', sentiment.positive_ratio * 100, '#4CAF50'),
+                ('Neutral', sentiment.neutral_ratio * 100, '#FFC107'),
+                ('Negative', sentiment.negative_ratio * 100, '#F44336')
+            ]:
+                st.markdown(
+                    f"""<div style="margin: 5px 0;">
+                        <span style="font-weight: bold;">{category}:</span>
+                        <div style="background-color: {color}; width: {pct}%; height: 25px; 
+                                    display: inline-block; border-radius: 5px; vertical-align: middle;"></div>
+                        <span style="margin-left: 10px;">{pct:.1f}%</span>
+                    </div>""",
+                    unsafe_allow_html=True
+                )
+        
+        with col_details:
+            if sentiment.key_positive_aspects:
+                st.markdown("**✅ Positive Aspects:**")
+                for aspect in sentiment.key_positive_aspects:
+                    st.markdown(f"• {aspect}")
+            
+            if sentiment.key_negative_aspects:
+                st.markdown("**❌ Negative Aspects:**")
+                for aspect in sentiment.key_negative_aspects:
+                    st.markdown(f"• {aspect}")
+        
+        # Advanced metrics
+        with st.expander("📊 Advanced Sentiment Metrics"):
+            col_pol, col_sub = st.columns(2)
+            
+            with col_pol:
+                st.markdown("**Polarity Score**")
+                st.markdown(f"Score: **{sentiment.polarity_score:+.2f}**")
+                polarity_pct = (sentiment.polarity_score + 1) / 2
+                st.progress(polarity_pct)
+                st.caption("-1 = Very Negative, 0 = Neutral, +1 = Very Positive")
+            
+            with col_sub:
+                st.markdown("**Subjectivity Score**")
+                st.markdown(f"Score: **{sentiment.subjectivity_score:.2f}**")
+                st.progress(sentiment.subjectivity_score)
+                st.caption("0 = Objective/Factual, 1 = Subjective/Opinionated")
+    
+    def _get_sentiment_color(self, score: float) -> str:
+        """Get color for sentiment score"""
+        if score >= 0.5:
+            return "#4CAF50"
+        elif score >= 0.1:
+            return "#8BC34A"
+        elif score >= -0.1:
+            return "#FFC107"
+        elif score >= -0.5:
+            return "#FF9800"
+        else:
+            return "#F44336"
+    
+    def _render_current_product_sidebar(self):
+        """Enhanced sidebar with sentiment indicator"""
+        st.success(f"**Current Product:**\n{st.session_state.current_product}")
+        st.markdown("---")
+        
+        if st.session_state.review_data:
+            review = st.session_state.review_data
+            
+            # Image thumbnail
+            if hasattr(review, 'primary_image_url') and review.primary_image_url:
+                try:
+                    st.image(review.primary_image_url, use_container_width=True)
+                except:
+                    pass
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("Rating", review.predicted_rating)
+            with col2:
+                if hasattr(review, 'sentiment_analysis') and review.sentiment_analysis:
+                    st.metric("Sentiment", f"{review.sentiment_analysis.sentiment_emoji}")
+                else:
+                    if review.data_source_type == 'free_web_search':
+                        st.metric("Sources", len(review.sources))
+                    else:
+                        st.metric("Source", "AI KB")
+            
+            # Sentiment score
+            if hasattr(review, 'sentiment_analysis') and review.sentiment_analysis:
+                sentiment = review.sentiment_analysis
+                st.markdown(f"**Sentiment:** {sentiment.overall_sentiment}")
+                score_color = sentiment.sentiment_color
+                st.markdown(
+                    f"<div style='background-color: {score_color}; padding: 10px; "
+                    f"border-radius: 5px; text-align: center; color: white; font-weight: bold;'>"
+                    f"Score: {sentiment.compound_score:+.2f}</div>",
+                    unsafe_allow_html=True
+                )
+            
+            st.metric("Pros", len(review.pros))
+            st.metric("Cons", len(review.cons))
+        
+        st.markdown("---")
+        
+        if st.button("🔄 Review Different Product", use_container_width=True):
+            self._reset_conversation()
+            st.rerun()
+
+# =============================================================================
 # MAIN APPLICATION
 # =============================================================================
 
 def main():
-    """Main application entry point"""
+    """Enhanced main application with sentiment analysis and images"""
     
     # Page configuration
     st.set_page_config(
-        page_title="AI Product Review Chat",
+        page_title="AI Product Review Chat - Enhanced",
         page_icon="🤖", 
-        layout="wide"
+        layout="wide",
+        initial_sidebar_state="expanded"
     )
     
-    # Custom CSS
+    # Enhanced custom CSS
     st.markdown("""
     <style>
-        .stApp {
-            max-width: 1200px;
-            margin: 0 auto;
-        }
-        .source-badge {
-            display: inline-block;
-            padding: 4px 12px;
-            background: #e3f2fd;
-            border-radius: 12px;
-            font-size: 12px;
-            margin: 2px;
-        }
-        .metric-card {
-            background: #f5f5f5;
-            padding: 16px;
-            border-radius: 8px;
-            text-align: center;
-        }
+        .stApp { max-width: 1400px; margin: 0 auto; }
+        .sentiment-positive { color: #4CAF50; font-weight: bold; }
+        .sentiment-negative { color: #F44336; font-weight: bold; }
+        .sentiment-neutral { color: #FFC107; font-weight: bold; }
+        .product-image { border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
     </style>
     """, unsafe_allow_html=True)
     
     # Initialize services
     try:
         groq_api_key = st.secrets["GROQ_API_KEY"]
-        review_service = ProductReviewService(groq_api_key)
-        ui = StreamlitUI(review_service)
-        
+        review_service = EnhancedProductReviewService(groq_api_key)
+        ui = EnhancedStreamlitUI(review_service)
     except KeyError:
-        st.error("❌ Groq API key not found in secrets.toml. Please add it to continue.")
+        st.error("❌ Groq API key not found in secrets.toml")
+        st.info("💡 Add: `GROQ_API_KEY = \"your_key\"` to `.streamlit/secrets.toml`")
         st.stop()
     except Exception as e:
-        st.error(f"❌ Failed to initialize application: {e}")
+        st.error(f"❌ Initialization failed: {e}")
         st.stop()
     
-    # Render sidebar
     ui.render_sidebar()
     
-    # Main content area
+    # Main content
     if not st.session_state.chat_mode:
-        # Search interface
         product_input, search_button, use_web = ui.render_search_interface()
         
-        # Handle example product
         if hasattr(st.session_state, 'example_product'):
             product_input = st.session_state.example_product
             search_button = True
             del st.session_state.example_product
         
-        # Handle search
         if search_button and product_input:
-            with st.spinner(f"{'🔍 Searching the web and analyzing' if use_web else '🤖 Analyzing'} '{product_input}'..."):
-                try:
-                    review_data = review_service.generate_review(product_input, use_web_search=use_web)
-                    
-                    st.session_state.current_product = product_input
-                    st.session_state.review_data = review_data
-                    st.session_state.chat_mode = True
-                    
-                    # Add initial review to conversation
-                    review_summary = f"""I've analyzed the {review_data.product_name}. Here's my review:
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
+            try:
+                status_text.text("🔍 Searching..."); progress_bar.progress(20)
+                status_text.text("📄 Analyzing..."); progress_bar.progress(40)
+                status_text.text("🖼️ Fetching images..."); progress_bar.progress(60)
+                status_text.text("🤖 Generating review..."); progress_bar.progress(80)
+                status_text.text("🎭 Analyzing sentiment..."); progress_bar.progress(90)
+                
+                review_data = review_service.generate_review(product_input, use_web)
+                
+                progress_bar.progress(100)
+                status_text.text("✅ Complete!")
+                time.sleep(0.5)
+                progress_bar.empty()
+                status_text.empty()
+                
+                st.session_state.current_product = product_input
+                st.session_state.review_data = review_data
+                st.session_state.chat_mode = True
+                
+                # Create initial message
+                sentiment = review_data.sentiment_analysis if hasattr(review_data, 'sentiment_analysis') else None
+                sentiment_text = f"""
 
-Rating: {review_data.predicted_rating}
+**Sentiment Analysis:**
+- Overall: {sentiment.overall_sentiment} {sentiment.sentiment_emoji}
+- Score: {sentiment.compound_score:+.2f}
+- Tone: {sentiment.emotional_tone}
+- Confidence: {sentiment.sentiment_confidence:.0%}""" if sentiment else ""
 
-Price: {review_data.price_info}
+                review_summary = f"""I've analyzed **{review_data.product_name}**:
 
-Key Specs: {review_data.specifications_inferred}
+**Rating:** {review_data.predicted_rating} ⭐
+**Price:** {review_data.price_info}
+**Specs:** {review_data.specifications_inferred}
 
-Strengths: {', '.join(review_data.pros[:3])}
+**Top Strengths:** {', '.join(review_data.pros[:3])}
+**Main Weaknesses:** {', '.join(review_data.cons[:3])}
 
-Weaknesses: {', '.join(review_data.cons[:3])}
+**Verdict:** {review_data.verdict[:200]}...{sentiment_text}
 
-Verdict: {review_data.verdict}
+**Data Source:** {review_data.data_source_type.replace('_', ' ').title()}
+{'**Images Found:** ' + str(len(review_data.product_images)) if hasattr(review_data, 'product_images') else ''}
 
-Data Source: {review_data.data_source_type.replace('_', ' ').title()}
+Ask me anything about this product!"""
 
-Feel free to ask me any questions about this product!"""
-
-                    st.session_state.messages.append({
-                        "role": "assistant",
-                        "content": review_summary,
-                        "timestamp": datetime.now().strftime("%I:%M %p")
-                    })
-                    
-                    st.rerun()
-                    
-                except ProductReviewError as e:
-                    st.error(f"❌ {e}")
-                except Exception as e:
-                    st.error(f"❌ Unexpected error: {e}")
-    
+                st.session_state.messages.append({
+                    "role": "assistant",
+                    "content": review_summary,
+                    "timestamp": datetime.now().strftime("%I:%M %p")
+                })
+                
+                st.rerun()
+                
+            except Exception as e:
+                progress_bar.empty()
+                status_text.empty()
+                st.error(f"❌ Error: {e}")
+                if st.button("🔄 Try AI Knowledge"):
+                    try:
+                        review_data = review_service.generate_review(product_input, False)
+                        st.session_state.current_product = product_input
+                        st.session_state.review_data = review_data
+                        st.session_state.chat_mode = True
+                        st.rerun()
+                    except Exception as e2:
+                        st.error(f"❌ Fallback failed: {e2}")
     else:
-        # Chat interface
         ui.render_chat_interface()
+        
+        # Sidebar sentiment during chat
+        if st.session_state.review_data and hasattr(st.session_state.review_data, 'sentiment_analysis'):
+            with st.sidebar:
+                st.markdown("---")
+                st.markdown("### 🎭 Quick Sentiment")
+                sentiment = st.session_state.review_data.sentiment_analysis
+                if sentiment:
+                    st.markdown(f"**{sentiment.sentiment_emoji} {sentiment.overall_sentiment}**")
+                    st.caption(f"Tone: {sentiment.emotional_tone}")
+                    st.progress((sentiment.compound_score + 1) / 2)
+                    st.caption(f"Score: {sentiment.compound_score:+.2f}")
 
 if __name__ == "__main__":
     main()
+
+# =============================================================================
+# END OF PART 4 - COMPLETE APPLICATION
+# =============================================================================
+
+"""
+🎉 COMPLETE APPLICATION - ALL 4 PARTS COMBINED!
+
+TO USE THIS APPLICATION:
+
+1. COMBINE ALL 4 PARTS:
+   - Part 1: Core infrastructure
+   - Part 2: Web services  
+   - Part 3: AI integration
+   - Part 4: UI (this file)
+
+2. INSTALL DEPENDENCIES:
+   pip install streamlit groq pydantic requests beautifulsoup4 textblob vaderSentiment Pillow
+   python -m textblob.download_corpora
+
+3. SETUP API KEY:
+   Create .streamlit/secrets.toml:
+   GROQ_API_KEY = "your_groq_api_key"
+
+4. RUN APPLICATION:
+   streamlit run your_app_name.py
+
+FEATURES:
+✅ Real-time web search & scraping
+✅ Product image fetching (DuckDuckGo + Bing)
+✅ Dual-engine sentiment analysis (VADER + TextBlob)
+✅ Beautiful UI with charts & visualizations
+✅ Interactive chat about products
+✅ Intelligent caching
+✅ Error handling & fallbacks
+✅ Sentiment confidence scores
+✅ Emotional tone detection
+✅ Aspect-based sentiment analysis
+"""
