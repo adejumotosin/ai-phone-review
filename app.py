@@ -1,7 +1,3 @@
-"""
-Complete AI Product Review Engine with Sentiment Analysis & Image Fetching
-Part 1 of 4: Core Infrastructure & Configuration
-"""
 
 import streamlit as st
 import json
