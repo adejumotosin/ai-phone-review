@@ -1,30 +1,11 @@
-# Core Framework
-streamlit==1.28.0
-
-# AI/LLM
-groq==0.4.1
-
-# Data Validation
-pydantic==2.5.0
-
-# Web Scraping & Requests
-requests==2.31.0
-beautifulsoup4==4.12.2
-lxml==4.9.3
-
-# Sentiment Analysis
-textblob==0.17.1
-vaderSentiment==3.3.2
-
-# Image Processing
-Pillow==10.1.0
-
-# Utilities
-python-dateutil==2.8.2
-urllib3==2.0.7
-
-# Optional but Recommended
-numpy==1.24.3
-
-# For better HTML parsing
-html5lib==1.1
+streamlit>=1.28.0
+groq>=0.4.1
+pydantic>=2.5.0
+requests>=2.31.0
+beautifulsoup4>=4.12.2
+textblob>=0.17.1
+vaderSentiment>=3.3.2
+Pillow>=10.1.0
+python-dateutil>=2.8.2
+numpy>=1.24.3
+html5lib>=1.1
